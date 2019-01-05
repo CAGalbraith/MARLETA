@@ -169,7 +169,7 @@ class StagedActivation(BaseScheduler):
     # accepted offers arguments, and will need changing in the future.
 
     def step(self, stage, generation = None, 
-             system_marginal_cost = None):
+             px_marginal_cost = None):
         
         """ Executes the given stage for all agents, passing *args. """
         
@@ -181,12 +181,12 @@ class StagedActivation(BaseScheduler):
         # stage asks for it. Definitely needs to be generalised more.
             
         for agent_key in agent_keys:
-            if stage == 'make_offer':
+            if stage == 'make_px_offer':
                 getattr(self._agents[agent_key], stage)()
             elif stage == 'update_px_propensities':
-                getattr(self._agents[agent_key], stage)(generation, system_marginal_cost)
+                getattr(self._agents[agent_key], stage)(generation, px_marginal_cost)
             elif stage == 'update_bm_propensities':
-                getattr(self._agents[agent_key], stage)(generation, 0)
+                getattr(self._agents[agent_key], stage)(generation)
             else:
                 pass
         

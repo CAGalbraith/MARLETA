@@ -68,7 +68,7 @@ phys_params = {
 sim_params = {}
 
 # defines the agent methods that are going to be called during each step
-sim_params['stage_list'] = ['make_offer',
+sim_params['stage_list'] = ['make_px_offer',
                             'update_px_propensities',
                             'update_bm_propensities']
 
@@ -83,7 +83,7 @@ sim_params['constraints'] = 'all'
 # controls whether stochastic additions are made to demand and wind, and their severity
 sim_params['demand_sd'] = 0
 
-sim_params['wind_sd'] = phys_params['wind']['cap']/8
+sim_params['wind_sd'] = phys_params['wind']['cap']/12
 
 # scales the demand such that total generation capacity = max demand * margin
 sim_params['peak_margin'] = 1.36
