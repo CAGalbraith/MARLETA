@@ -160,16 +160,34 @@ class Generator(mesa.Agent):
         
         if self.fuel == 'wind':
             # uses a simple AR(2) with mean-reversion to give a more realistic
-            # forecast error term
+            # forecast error term, scaled by the actual wind output so that
+            # the errors are not grossly over-pronounced when wind is low
             
-            wind_errors = np.zeros(48)
-            wind_errors[0] = np.random.normal(scale = self.wind_sd)
-            wind_errors[1] = 0.2 * wind_errors[0] + 0.5 * np.random.normal(scale = self.wind_sd) 
+            forecast_wind = np.zeros(48)
+            
+            forecast_wind[0] = (self.wind_profile[0]/2) * (1 + np.random.normal(scale = self.wind_sd))
+            forecast_wind[1] = forecast_wind[0] + 0.25*(self.wind_profile[1]/2 - forecast_wind[0])
+            
             for i in range(2, 48):
-                wind_errors[i] = wind_errors[i-1] + 0.2*wind_errors[i-2] + 0.25*(0 - wind_errors[i-1]) + 0.25*np.random.normal(scale = self.wind_sd)
-            
-            self.px_offer = [[(self.wind_profile[period]/2) + wind_errors[period], 0, (self.wind_profile[period]/2) + wind_errors[period], 0] for period in range(48)]
- 
+                
+                forecast_wind[i] = forecast_wind[i-1]*(1 + np.random.normal(scale = self.wind_sd)) + \
+                                   0.2*forecast_wind[i-2] + 0.25*(self.wind_profile[i]/2 - forecast_wind[i-1])
+           
+            self.px_offer = [[forecast_wind[period], 0, forecast_wind[period], 0] for period in range(48)]
+
+# =============================================================================
+#             wind_errors = np.zeros(48)
+#             wind_errors[0] = np.random.normal(scale = self.wind_sd)
+#             wind_errors[1] = 0.2 * wind_errors[0] + 0.5 * np.random.normal(scale = self.wind_sd) 
+#             for i in range(2, 48):
+#                 wind_errors[i] = wind_errors[i-1] + 0.2*wind_errors[i-2] + 0.25*(0 - wind_errors[i-1]) + 0.25*np.random.normal(scale = self.wind_sd)
+#             
+#             self.px_offer = [[(self.wind_profile[period]/2) * (1 + wind_errors[period]/max(self.wind_profile/2)),
+#                                0,
+#                                (self.wind_profile[period]/2) * (1 + wind_errors[period]/max(self.wind_profile/2)),
+#                                0] for period in range(48)]
+#  
+# =============================================================================
             return
         
         if (self.offer_method == 'increment' and self.day == 0):
@@ -664,7 +682,7 @@ class Supplier():
         the market is to be cleared, in MW. Returns a tuple of forecast demand
         and the bid level.
         """
-        
+
         demand_forecast = (demand[period]/2 * self.market_share) * (1 + np.random.normal(scale = self.forecast_error))
         
         if self.strategy == 0:

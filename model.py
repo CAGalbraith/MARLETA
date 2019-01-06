@@ -127,7 +127,8 @@ class MarketModel(mesa.Model):
                                    'offer_curtailments': 'constrained_schedule',
                                    'gen_labels': 'gen_labels',
                                    'generation': 'generation',
-                                   'imbalance': 'imbalance'})
+                                   'imbalance': 'imbalance',
+                                   'bm_marginal_price': 'bm_marginal_price'})
 
 
     def constrained_scheduler(self, unconstrained_schedule, period):
@@ -385,7 +386,11 @@ class MarketModel(mesa.Model):
             bm_actions = list(np.where(cumulative_bids >= -imbalance, 
                                        1, 0))
             
-            if 0 in bm_actions:
+            if bm_actions[0] == 0:
+                
+                bm_actions[0] = imbalance / -bm_bids[0][1]
+                
+            elif 0 in bm_actions:
                 
                 self.bm_marginal_price[period] = bm_bids[bm_actions.index(0)][2]
                 bm_actions[bm_actions.index(0)] = (imbalance + cumulative_bids[bm_actions.index(0) - 1]) \
@@ -412,10 +417,14 @@ class MarketModel(mesa.Model):
             bm_actions = list(np.where(cumulative_offers <= -imbalance, 
                                        1, 0))
             
-            if 0 in bm_actions:
+            if bm_actions[0] == 0:
+                
+                bm_actions[0] = -imbalance / bm_offers[0][1]
+                
+            elif 0 in bm_actions:
                 
                 self.bm_marginal_price[period] = bm_offers[bm_actions.index(0)][2]
-                bm_actions[bm_actions.index(0)] = (-imbalance + cumulative_offers[bm_actions.index(0) - 1]) \
+                bm_actions[bm_actions.index(0)] = (-imbalance - cumulative_offers[bm_actions.index(0) - 1]) \
                                                             / (bm_offers[bm_actions.index(0)][1])
                                                         
             else:
@@ -669,6 +678,7 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
     offer_curtailments = model.datacollector.get_model_vars_dataframe()['offer_curtailments']
     generation = model.datacollector.get_model_vars_dataframe()['generation']
     imbalance = model.datacollector.get_model_vars_dataframe()['imbalance']
+    bm_marginal_price = model.datacollector.get_model_vars_dataframe()['bm_marginal_price']
     gen_labels = model.datacollector.get_model_vars_dataframe()['gen_labels']
     
     # The below code generates data averaging the dispatch mix, average
@@ -775,6 +785,7 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
                'gen_labels': gen_labels,
                'generation': generation,
                'imbalance': imbalance,
+               'bm_marginal_price': bm_marginal_price,
                'avg_offer_price': avg_offer_price,
                'avg_fuel_mix': avg_fuel_mix,
                'rolling_off_price': rolling_offers_off,

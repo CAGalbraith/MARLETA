@@ -83,7 +83,7 @@ sim_params['constraints'] = 'all'
 # controls whether stochastic additions are made to demand and wind, and their severity
 sim_params['demand_sd'] = 0
 
-sim_params['wind_sd'] = phys_params['wind']['cap']/12
+sim_params['wind_sd'] = 0.02
 
 # scales the demand such that total generation capacity = max demand * margin
 sim_params['peak_margin'] = 1.36
