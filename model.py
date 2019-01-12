@@ -9,9 +9,10 @@ import numpy as np
 import pandas as pd
 import math as m
 from collections import OrderedDict
-from random import choices
+from random import choices, shuffle
 from matplotlib import pyplot as plt
 from matplotlib import colors as mcolors
+from matplotlib import patches as mpatches
 
 from copy import deepcopy
 
@@ -83,12 +84,14 @@ class MarketModel(mesa.Model):
         self.params['demand_profile'] = self.demand
 
         # initialise supply agents; [market share, forecast error, strategy]
-        # TODO: initialise suppliers using params['num_suppliers'] 
+        # TODO: initialise suppliers using params['num_suppliers']
         
-        supplier_params = [[0.3, 0.03, 1], [0.2, 0.02, 0], [0.2, 0.02, 2],
-                           [0.15, 0.04, 1], [0.1, 0.02, 0], [0.05, 0.01, 2]]
+        if self.params['use_supplier_agents'] == True:
         
-        self.suppliers = [agents.Supplier(params) for params in supplier_params]
+            supplier_params = [[0.3, 0.03, 1], [0.2, 0.02, 0], [0.2, 0.02, 2],
+                               [0.15, 0.04, 1], [0.1, 0.02, 0], [0.05, 0.01, 2]]
+            
+            self.suppliers = [agents.Supplier(supplier_params, self.demand, self.params) for supplier_params in supplier_params]
         
         # internalise a labeled list of generators' id, fuel type, and capacity,
         # and assign each a unique colour from the xkcd colourset (949 + 10 standard)
@@ -101,34 +104,47 @@ class MarketModel(mesa.Model):
         for agent in self.schedule.agents:
             
             self.gen_labels[agent.id] = [agent.fuel, agent.capacity, colours[agent.id]]
-        
-        
+                
         
         # initialises constraints
         
-        self.constraints = params['constraints']
-                
-        
+        self.constraints = params['constraints']                    
+            
         
         # initialise Mesa's datacollector functionality
         
-        self.datacollector = DataCollector(
-                agent_reporters = {'px_day_profit': 'px_day_profit',
-                                   'px_period_profit': 'px_period_profit',
-                                   'max_props': 'max_propensities',
-                                   'px_price_props': 'px_price_propensities',
-                                   'px_volume_props': 'px_volume_propensities',
-                                   'bm_props' : 'bm_propensities',
-                                   'expected_profits': 'expected_profits',
-                                   'px_offers': 'px_offer',
-                                   'bm_period_profit': 'bm_period_profit',
-                                   'bm_day_profit': 'bm_day_profit'},
-                model_reporters = {'dispatch_schedules': 'dispatch_schedules',
-                                   'offer_curtailments': 'constrained_schedule',
-                                   'gen_labels': 'gen_labels',
-                                   'generation': 'generation',
-                                   'imbalance': 'imbalance',
-                                   'bm_marginal_price': 'bm_marginal_price'})
+        if params['verbose_data_collection'] == True:
+        
+            self.datacollector = DataCollector(
+                    agent_reporters = {'px_day_profit': 'px_day_profit',
+                                       'px_period_profit': 'px_period_profit',
+                                       'px_price_props': 'px_price_propensities',
+                                       'px_volume_props': 'px_volume_propensities',
+                                       'bm_intercept_props' : 'bm_intercept_propensities',
+                                       'bm_gradient_props': 'bm_gradient_propensities',
+                                       'expected_profits': 'expected_profits',
+                                       'bm_period_profit': 'bm_period_profit',
+                                       'bm_day_profit': 'bm_day_profit',
+                                       'bm_intercept_choices': 'bm_intercept_choices',
+                                       'bm_gradient_choices': 'bm_gradient_choices'},
+                    model_reporters = {'px_dispatch': 'px_dispatch',
+                                       'offer_curtailments': 'constrained_schedule',
+                                       'gen_labels': 'gen_labels',
+                                       'generation': 'generation',
+                                       'imbalance': 'imbalance',
+                                       'px_marginal_price': 'px_marginal_price',
+                                       'bm_marginal_price': 'bm_marginal_price'})
+        else:
+            
+            self.datacollector = DataCollector(
+                    agent_reporters = {'px_day_profit': 'px_day_profit',
+                                       'bm_day_profit': 'bm_day_profit'},
+                    model_reporters = {'px_dispatch': 'px_dispatch',
+                                       'gen_labels': 'gen_labels',
+                                       'generation': 'generation',
+                                       'imbalance': 'imbalance',
+                                       'px_marginal_price': 'px_marginal_price',
+                                       'bm_marginal_price': 'bm_marginal_price'})
 
 
     def constrained_scheduler(self, unconstrained_schedule, period):
@@ -189,7 +205,7 @@ class MarketModel(mesa.Model):
                                           1, 0))
           
         if 0 in satisfying_demand:
-            self.px_marginal_cost[period] = self.px_period_offers[period][satisfying_demand.index(0)]
+            self.px_marginal_price[period] = self.px_period_offers[period][satisfying_demand.index(0)]
             satisfying_demand[satisfying_demand.index(0)] = 1
             
         for i, (agent_id, dispatch) in enumerate(constrained_schedule.items()):
@@ -233,11 +249,11 @@ class MarketModel(mesa.Model):
             
             bids = sorted(bids, key = lambda tup: tup[1], reverse = True)
     
-            demand_forecast = sum([bid[0] for bid in bids]) + offers[1][0] - self.wind_profile[period]/2
+            demand_forecast = sum([bid[0] for bid in bids])
         
         else:
             
-            demand_forecast = demand[period]/2 + offers[1][0] - self.wind_profile[period]/2
+            demand_forecast = demand[period]/2
 
         # bids are tuples of forecast demand in MWh and bid price in £/MWh. For
         # now, the bid price is ignored and the generators are paid what they
@@ -268,20 +284,20 @@ class MarketModel(mesa.Model):
 #            
 #        if 0 in accepted_offers:
 #                
-#            self.px_marginal_cost[period] = list(offers.items())[accepted_offers.index(0)][1][1]
+#            self.px_marginal_price[period] = list(offers.items())[accepted_offers.index(0)][1][1]
 #            accepted_offers[accepted_offers.index(0)] = (demand_forecast - cumulative_offers[accepted_offers.index(0) - 1]) \
 #                                                        / list(offers.items())[accepted_offers.index(0)][1][0]
 #                                                        
 #        else:
 #            
-#            self.px_marginal_cost[period] = list(self.px_period_offers[period].items())[-1][1][1]
+#            self.px_marginal_price[period] = list(self.px_period_offers[period].items())[-1][1][1]
 #        
         
         # ADVANCED MARGINAL GENERATION WITH CASES AND CONSTRAINTS
         
         if 0 in accepted_offers:
             
-            self.px_marginal_cost[period] = list(offers.items())[accepted_offers.index(0)][1][1]
+            self.px_marginal_price[period] = list(offers.items())[accepted_offers.index(0)][1][1]
             
             marginal_volume = demand_forecast - cumulative_offers[accepted_offers.index(0) - 1]
             marginal_gen = self.schedule.agents[list(offers.items())[accepted_offers.index(0)][0]]
@@ -362,7 +378,14 @@ class MarketModel(mesa.Model):
         # store as (total_imbal, intermittent_imbal, demand_imbal).
         # Positive imbalance means system is long, negative means short. 
         
-        self.imbalance.append(demand_forecast - demand[period]/2)
+        # if demand_imbalance is +ve, system is long; if intermittent_imbalance
+        # is +ve, system is short. Therefore total imbalance equals demand -
+        # intermittent imbalance
+        
+        demand_imbalance = demand_forecast - demand[period]/2
+        intermittent_imbalance = offers[1][0] - self.wind_profile[period]/2
+        
+        self.imbalance.append(demand_imbalance - intermittent_imbalance)
         
         return accepted_offers
     
@@ -373,8 +396,13 @@ class MarketModel(mesa.Model):
         the generator bids and offers. Clears the market by matching the
         cheapest offers if the system is short or the most expensive bids if
         the system is long, returning an array of accepted actions and stores the 
-        marginal cost of the most expensive action taken.
+        marginal cost of the most expensive action taken. Marginal cost given
+        as [system_position (0 for short, 1 for long), price]
         """
+        
+        if (imbalance == 0) or (bm_offers == []) or (bm_bids == []):
+            
+            return []
 
         # if system is long, need to use bids to reduce the px generation
         if imbalance > 0:
@@ -388,17 +416,18 @@ class MarketModel(mesa.Model):
             
             if bm_actions[0] == 0:
                 
+                self.bm_marginal_price.append([1, bm_bids[bm_actions.index(0)][2]])
                 bm_actions[0] = imbalance / -bm_bids[0][1]
                 
             elif 0 in bm_actions:
                 
-                self.bm_marginal_price[period] = bm_bids[bm_actions.index(0)][2]
+                self.bm_marginal_price.append([1, bm_bids[bm_actions.index(0)][2]])
                 bm_actions[bm_actions.index(0)] = (imbalance + cumulative_bids[bm_actions.index(0) - 1]) \
                                                             / (-bm_bids[bm_actions.index(0)][1])
                                                         
             else:
             
-                self.bm_marginal_price[period] = bm_bids[-1][2]
+                self.bm_marginal_price.append([1, bm_bids[-1][2]])
             
             accepted_bm_actions = []
             
@@ -411,25 +440,26 @@ class MarketModel(mesa.Model):
         elif imbalance < 0:
             
             volume_offers = [offer[1] for offer in bm_offers]
-            
+
             cumulative_offers = np.cumsum(volume_offers)
         
             bm_actions = list(np.where(cumulative_offers <= -imbalance, 
                                        1, 0))
-            
+
             if bm_actions[0] == 0:
                 
+                self.bm_marginal_price.append([0, bm_offers[bm_actions.index(0)][2]])
                 bm_actions[0] = -imbalance / bm_offers[0][1]
                 
             elif 0 in bm_actions:
                 
-                self.bm_marginal_price[period] = bm_offers[bm_actions.index(0)][2]
+                self.bm_marginal_price.append([0, bm_offers[bm_actions.index(0)][2]])
                 bm_actions[bm_actions.index(0)] = (-imbalance - cumulative_offers[bm_actions.index(0) - 1]) \
                                                             / (bm_offers[bm_actions.index(0)][1])
                                                         
             else:
             
-                self.bm_marginal_price[period] = bm_offers[-1][2]
+                self.bm_marginal_price.append([0, bm_offers[-1][2]])
                 
             accepted_bm_actions = []
             
@@ -478,8 +508,8 @@ class MarketModel(mesa.Model):
         # clear the market according to cheapest offers per period
         
         self.px_period_offers = OrderedDict()
-        self.px_marginal_cost = OrderedDict()
-        self.bm_marginal_price = OrderedDict()
+        self.px_marginal_price = OrderedDict()
+        self.bm_marginal_price = []
         self.imbalance = []
         
         self.constrained_schedule = OrderedDict()
@@ -535,12 +565,21 @@ class MarketModel(mesa.Model):
             self.generation[period] = OrderedDict()
             for agent in self.schedule.agents:
 #                agent.last_dispatch = self.constrained_schedule[period][agent.id]
-                self.generation[period].update(
-                        {agent.id: [agent.fuel,
-                                    agent.px_offer[period][0] * self.constrained_schedule[period][agent.id],
-                                    self.px_period_offers[period][agent.id][1],
-                                    0, [],
-                                    agent.px_offer[period][0] * self.constrained_schedule[period][agent.id]]})
+                if agent.fuel == 'wind':
+                    
+                    self.generation[period].update(
+                            {agent.id: [agent.fuel,
+                                        agent.px_offer[period][0],
+                                        0, 0, [],
+                                        self.wind_profile[period]/2]})
+                else:
+                        
+                    self.generation[period].update(
+                            {agent.id: [agent.fuel,
+                                        agent.px_offer[period][0] * self.constrained_schedule[period][agent.id],
+                                        self.px_period_offers[period][agent.id][1],
+                                        0, [],
+                                        agent.px_offer[period][0] * self.constrained_schedule[period][agent.id]]})
             
         
         # create per-period dispatch schedules, consisting of tuples of the gen
@@ -548,15 +587,15 @@ class MarketModel(mesa.Model):
         # as amended by any rational constraints. Note that this is the pre-
         # balancing mechanism dispatch, i.e. the FPN!
         
-        self.dispatch_schedules = OrderedDict()
+        self.px_dispatch = OrderedDict()
     
         for period in range(48):
         
-            self.dispatch_schedules[period] = []
+            self.px_dispatch[period] = []
             
             for gen, accepted in self.constrained_schedule[period].items():
                 if accepted != 0:
-                    self.dispatch_schedules[period].append((gen, self.generation[period][gen][1]))
+                    self.px_dispatch[period].append((gen, self.generation[period][gen][1]))
                 else:
                     break
             
@@ -565,7 +604,7 @@ class MarketModel(mesa.Model):
         
         self.schedule.step(self.params['stage_list'][1], 
                            self.generation,
-                           self.px_marginal_cost)
+                           self.px_marginal_price)
         
         
         ### BALANCING MECHANISM CLEARING ###
@@ -598,9 +637,11 @@ class MarketModel(mesa.Model):
                     if action[1] != 0:
                         self.bm_period_bids[period].append(action)
             
-            # flattens list of lists
-#            self.bm_period_offers[period] = [item for sublist in self.bm_period_offers[period] for item in sublist]
-#            self.bm_period_bids[period] = [item for sublist in self.bm_period_bids[period] for item in sublist]
+            # first shuffles the list so that individual generators are not
+            # favoured for having proximate prices between their offers
+            
+            shuffle(self.bm_period_offers[period])
+            shuffle(self.bm_period_bids[period])
             
             # sorts by offer price   
             self.bm_period_offers[period] = sorted(self.bm_period_offers[period], 
@@ -619,8 +660,8 @@ class MarketModel(mesa.Model):
                                                               period)
             
         
-            # convert accepted_bm_actions to an ordered dictionary of 
-            # agent: accepted actions, ready to update the generation dict
+            # accepted_bm_actions of the form [agent.id, volume, price], in 
+            # order of price
                         
             for action in accepted_bm_actions:
                 self.generation[period][action[0]][3] += action[1]
@@ -652,7 +693,8 @@ def running_mean(x, N):
 # graph in order to bid price for the final day, and an averaged generation
 # fuel mix over the final 50 days
 
-def run_simulation(model_class, params, days, show_graphs = False, save_graphs = False, iterate = False, name = None):
+def run_simulation(model_class, params, days, show_graphs = False, save_graphs = False, 
+                   iterate = False, name = None):
     
     params['days'] = days
 
@@ -661,25 +703,36 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
     for i in tqdm(range(days), desc = 'Running Model: "{0}"'.format(name)):
         model.step()
     
-    # agent variables from datacollector    
+    # agent variables from datacollector
     px_day_profit = model.datacollector.get_agent_vars_dataframe()['px_day_profit']
-    px_period_profit = model.datacollector.get_agent_vars_dataframe()['px_period_profit']
-    px_price_props = model.datacollector.get_agent_vars_dataframe()['px_price_props']
-    px_volume_props = model.datacollector.get_agent_vars_dataframe()['px_volume_props']
-    bm_props = model.datacollector.get_agent_vars_dataframe()['bm_props']
-    max_props = model.datacollector.get_agent_vars_dataframe()['max_props']
-    px_offers = model.datacollector.get_agent_vars_dataframe()['px_offers']
-    expected_profits = model.datacollector.get_agent_vars_dataframe()['expected_profits']
-    bm_period_profit = model.datacollector.get_agent_vars_dataframe()['bm_period_profit']
     bm_day_profit = model.datacollector.get_agent_vars_dataframe()['bm_day_profit']
     
+    if params['verbose_data_collection'] == True:    
+        
+        px_period_profit = model.datacollector.get_agent_vars_dataframe()['px_period_profit']
+        px_price_props = model.datacollector.get_agent_vars_dataframe()['px_price_props']
+        px_volume_props = model.datacollector.get_agent_vars_dataframe()['px_volume_props']
+        bm_intercept_props = model.datacollector.get_agent_vars_dataframe()['bm_intercept_props']
+        bm_gradient_props = model.datacollector.get_agent_vars_dataframe()['bm_gradient_props']
+        expected_profits = model.datacollector.get_agent_vars_dataframe()['expected_profits']
+        bm_period_profit = model.datacollector.get_agent_vars_dataframe()['bm_period_profit']
+        bm_intercept_choices = model.datacollector.get_agent_vars_dataframe()['bm_intercept_choices']
+        bm_gradient_choices = model.datacollector.get_agent_vars_dataframe()['bm_gradient_choices']
+    
     # model variables from datacollector
-    dispatch_schedules = model.datacollector.get_model_vars_dataframe()['dispatch_schedules']
-    offer_curtailments = model.datacollector.get_model_vars_dataframe()['offer_curtailments']
+    px_dispatch = model.datacollector.get_model_vars_dataframe()['px_dispatch']
     generation = model.datacollector.get_model_vars_dataframe()['generation']
     imbalance = model.datacollector.get_model_vars_dataframe()['imbalance']
     bm_marginal_price = model.datacollector.get_model_vars_dataframe()['bm_marginal_price']
+    px_marginal_price = model.datacollector.get_model_vars_dataframe()['px_marginal_price']
     gen_labels = model.datacollector.get_model_vars_dataframe()['gen_labels']
+    
+    if params['verbose_data_collection'] == True:
+        
+        offer_curtailments = model.datacollector.get_model_vars_dataframe()['offer_curtailments']
+        
+        
+
     
     # The below code generates data averaging the dispatch mix, average
     # bid price, and peak bid price of dispatched generators 
@@ -689,6 +742,7 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
     avg_fuel_mix = pd.DataFrame()
     avg_offer_price = pd.DataFrame()
     peak_offer_price = pd.DataFrame()
+    avg_bm_marginal_price = pd.DataFrame()
     
     for period in tqdm(range(48), desc = 'Crunching data...'):
         all_gen = pd.DataFrame({agent_id: np.zeros(100) for agent_id in gen_labels.iloc[-1].keys()})
@@ -715,8 +769,11 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
         
         avg_offer_price = avg_offer_price.append(avg_offers, ignore_index = True)
         peak_offer_price = peak_offer_price.append(peak_offers, ignore_index = True)
+        
+        avg_bm_marginal_price = avg_bm_marginal_price.append([[bm_marginal_price.iloc[-1][period][0], np.mean([bm_marginal_price.iloc[-day][period][1] for day in range(100)])]], ignore_index = True)
     
-     
+    avg_bm_marginal_price.columns = ['Direction', 'Price']
+    
     rolling_offers_peak = pd.DataFrame({agent_id: np.zeros(days) for agent_id in gen_labels.iloc[-1].keys()})
     rolling_offers_off = pd.DataFrame({agent_id: np.zeros(days) for agent_id in gen_labels.iloc[-1].keys()})
     
@@ -770,30 +827,57 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
     
     rms_dispatch_error = m.sqrt(sum(dispatch_error['total']) ** 2)
     
-    results = {'px_day_profit': px_day_profit,
-               'px_period_profit': px_period_profit,
-               'px_offers': px_offers,
-               'px_price_props': px_price_props,
-               'px_volume_props': px_volume_props,
-               'bm_props': bm_props,
-               'max_props': max_props,
-               'dispatch_schedules': dispatch_schedules,
-               'offer_curtailments': offer_curtailments,
-               'expected_profits': expected_profits,
-               'bm_period_profit': bm_period_profit,
-               'bm_day_profit': bm_day_profit,
-               'gen_labels': gen_labels,
-               'generation': generation,
-               'imbalance': imbalance,
-               'bm_marginal_price': bm_marginal_price,
-               'avg_offer_price': avg_offer_price,
-               'avg_fuel_mix': avg_fuel_mix,
-               'rolling_off_price': rolling_offers_off,
-               'rolling_peak_price': rolling_offers_peak,
-               'dispatch_error': dispatch_error,
-               'prop_dispatch_error': prop_dispatch_error,
-               'rms_dispatch_error': rms_dispatch_error,
-               'abs_prop_dispatch_error': abs_prop_dispatch_error}
+    if params['verbose_data_collection'] == True:
+        
+        results = {'px_day_profit': px_day_profit,
+                   'px_period_profit': px_period_profit,
+                   'px_price_props': px_price_props,
+                   'px_volume_props': px_volume_props,
+                   'bm_intercept_props': bm_intercept_props,
+                   'bm_gradient_props': bm_gradient_props,
+                   'bm_intercept_choices': bm_intercept_choices,
+                   'bm_gradient_choices': bm_gradient_choices,
+                   'px_dispatch': px_dispatch,
+                   'demand': model.demand,
+                   'offer_curtailments': offer_curtailments,
+                   'expected_profits': expected_profits,
+                   'bm_period_profit': bm_period_profit,
+                   'bm_day_profit': bm_day_profit,
+                   'gen_labels': gen_labels,
+                   'generation': generation,
+                   'imbalance': imbalance,
+                   'bm_marginal_price': bm_marginal_price,
+                   'px_marignal_price': px_marginal_price,
+                   'avg_bm_marginal_price': avg_bm_marginal_price,
+                   'avg_offer_price': avg_offer_price,
+                   'avg_fuel_mix': avg_fuel_mix,
+                   'rolling_off_price': rolling_offers_off,
+                   'rolling_peak_price': rolling_offers_peak,
+                   'dispatch_error': dispatch_error,
+                   'prop_dispatch_error': prop_dispatch_error,
+                   'rms_dispatch_error': rms_dispatch_error,
+                   'abs_prop_dispatch_error': abs_prop_dispatch_error}
+    else:
+        
+        results = {'px_day_profit': px_day_profit,
+                   'px_dispatch': px_dispatch,
+                   'demand': model.demand,
+                   'bm_day_profit': bm_day_profit,
+                   'gen_labels': gen_labels,
+                   'generation': generation,
+                   'imbalance': imbalance,
+                   'bm_marginal_price': bm_marginal_price,
+                   'px_marignal_price': px_marginal_price,
+                   'avg_bm_marginal_price': avg_bm_marginal_price,
+                   'avg_offer_price': avg_offer_price,
+                   'avg_fuel_mix': avg_fuel_mix,
+                   'rolling_off_price': rolling_offers_off,
+                   'rolling_peak_price': rolling_offers_peak,
+                   'dispatch_error': dispatch_error,
+                   'prop_dispatch_error': prop_dispatch_error,
+                   'rms_dispatch_error': rms_dispatch_error,
+                   'abs_prop_dispatch_error': abs_prop_dispatch_error}
+        
     
     
     if show_graphs == True:
@@ -822,13 +906,13 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
         fig2 = plt.figure(2)
         ax2 = plt.subplot(111)
         for period in range(48):
-            for i, (gen, dispatch) in enumerate(dispatch_schedules[days - 1][period]):
+            for i, (gen, dispatch) in enumerate(px_dispatch[days - 1][period]):
                 ax2.bar(range(period, period+1),
 #                        dispatch * 2,
                         generation.iloc[days-1][period][gen][5] * 2,
                         label = gen_labels[days-1][gen][0],
                         color = gen_labels[days-1][gen][2],
-                        bottom = sum([generation.iloc[days-1][period][j][5] * 2 for j in [dispatch_schedules[days - 1][period][z][0] for z in range(i)]]))
+                        bottom = sum([generation.iloc[days-1][period][j][5] * 2 for j in [px_dispatch[days - 1][period][z][0] for z in range(i)]]))
         ax2.plot(model.demand, 'b-', linewidth = 2)
         ax2.set(title = 'Final Day Dispatch in PX Offer Price Order with Demand',
                 xlabel = 'Iteration (Day)',
@@ -977,6 +1061,53 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
 
 
 
+def additional_graphs(results, num_gen, days):
+    
+    avg_bm_marginal_price = results['avg_bm_marginal_price']
+    sbp = results['bm_marginal_price']
+    imbal = results['imbalance']
+    bm_day_profit = results['bm_day_profit']
+    
+    avg_bm_marginal_price['Period'] = np.linspace(0, 47, 48)
+    direction = np.array(avg_bm_marginal_price['Direction'])
+    color = np.where(direction == 0, 'r', 'b')
+    red = mpatches.Patch(color = 'red', label = 'Short')
+    blue = mpatches.Patch(color = 'blue', label = 'Long')
+    ax12 = avg_bm_marginal_price[['Price']].plot() 
+    ax12 = avg_bm_marginal_price.plot.scatter(x = 'Period', y = 'Price', c = color, ax = ax12)
+    ax12.set(xlabel = 'Period',
+             xticks = list(range(0, 47, 2)),
+             xticklabels = list(range(0, 47, 2)),
+             ylabel = 'Price (£/MWh)', 
+             title = 'Average Balancing Mechanism Marginal Price over Final 100 Days');
+    ax12.legend(handles = [red, blue])
+    
+    plt.plot([x for x in imbal[days - 1]])
+    
+    plt.figure()
+    sbp_long = []
+    for _ in sbp:
+        if _[30][0] == 1:
+            sbp_long.append(_[30][1])
+    plt.title('SBP for Period 30')
+    
+    plt.plot(sbp_long)
+    
+    plt.figure()        
+    sbp_short = []
+    for _ in sbp:
+        if _[4][0] == 0:
+            sbp_short.append(_[4][1])
+    plt.title('SBP for period 4')
+    
+    plt.plot(sbp_short)
+    
+    plt.figure()
+    ax1 = bm_day_profit[2::num_gen].plot()
+    ax1.set(title = 'Daily BM Profits of Agent 2')
+
+
+
 def batchrun_simulation(model_class, fixed_params, days, 
                         variable_params = None, 
                         iterations = 1):
@@ -1007,7 +1138,7 @@ def batchrun_simulation(model_class, fixed_params, days,
     for i, value in enumerate(results[results.columns[0]]):
         
         profit = results['Datacollector'].iloc[i].get_agent_vars_dataframe()['px_day_profit']
-        dispatch_schedules = results['Datacollector'].iloc[i].get_model_vars_dataframe()['dispatch_schedules']
+        px_dispatch = results['Datacollector'].iloc[i].get_model_vars_dataframe()['px_dispatch']
         gen_labels = results['Datacollector'].iloc[i].get_model_vars_dataframe()['gen_labels'][days - 1]
         
         figure = plt.figure(i)
@@ -1023,21 +1154,25 @@ def batchrun_simulation(model_class, fixed_params, days,
         # TODO: integrate 'generation' dataframe to properly sum up lower dispatches
         figure = plt.figure(x)    
         for period in range(48):
-            for k, (gen, dispatch) in enumerate(dispatch_schedules[days - 1][period]):
+            for k, (gen, dispatch) in enumerate(px_dispatch[days - 1][period]):
                 plt.bar(range(period, period + 1),
                         dispatch,
                         label = gen_labels[gen][0],
                         color = gen_labels[gen][2],
-                        bottom = sum([gen_labels[h][1] for h in dispatch_schedules[days - 1][period][:k]]))
+                        bottom = sum([gen_labels[h][1] for h in px_dispatch[days - 1][period][:k]]))
         plt.title('Final Dispatch Schedule with {0}: {1}'.format(results.columns[0], value))
         
     return results
 
 
 def orderHeaders(params):
-    param_order = ['name','days','peak_margin','demand_sd','date','num_gen','num_wind','wind','wind_sd','num_ccgt','ccgt','num_coal','coal',
-                   'num_nuclear','nuclear', 'use_supplier_agents', 'num_suppliers','action_method','offer_method','constraints','temperature_inf','temperature_start','temperature_decay',
-                   'expmt','recency','epsilon','dampening_factor','reward_method','discount','kernel_radius','stage_list']
+    param_order = ['name','days','peak_margin','demand_sd','date','num_gen','num_wind','wind','wind_sd',
+                   'num_ccgt','ccgt','num_coal','coal','num_nuclear','nuclear', 'use_supplier_agents', 
+                   'num_suppliers','dynamic_imbalance','px_action_method','bm_action_method',
+                   'constraints','px_temperature_inf','px_temperature_start',
+                   'px_temperature_decay','bm_temperature_inf','bm_temperature_start','bm_temperature_decay',
+                   'px_expmt','bm_expmt','px_recency','bm_recency','epsilon','dampening_factor',
+                   'px_reward_method','bm_reward_method','discount','kernel_radius','stage_list']
     ordered_headers = OrderedDict([(k, None) for k in param_order if k in params])
     ordered_headers.update(params)
     return ordered_headers

@@ -5,62 +5,79 @@ Created on Wed Oct 17 13:34:23 2018
 
 @author: connorgalbraith
 """
-import model
+import numpy as np
+import pandas as pd
 import math as m
+
+import model
 
 # the parameters below are default fixed values; if they are to be made variable
 # in mesa's batchrunner, then a separate variable parameter dictionary is
 # specified and the corresponding keys removed from the fixed parameter
 # dictionary passed
 
-# CHANGE ORDERED HEADERS FUNCTION WHEN NEW PARAMETERS ADDED
+# CHANGE ORDERED HEADERS FUNCTION WHEN NEW PARAMETERS ARE ADDED
 
 ### learning parameters ###
 
 learning_params = {}
 
 # chooses between softmax, epsilon_greedy, or epsilon_kernel for converting propensities to actions
-learning_params['action_method'] = 'softmax'
+learning_params['px_action_method'] = 'epsilon_greedy'
+learning_params['bm_action_method'] = 'epsilon_greedy'
+
+# either holds the bm-ladder gradient at a fixed value, or lets the agents 
+# learn their own for each period (in which case, use 0)
+learning_params['bm_gradient_hold'] = 10
 
 # the hotter it gets, the more likely the agents will explore new strategies.
 # for constant T, set both _start and _inf as equal
-learning_params['temperature_inf'] = 1.999
-learning_params['temperature_start'] = 2
-learning_params['temperature_decay'] = 1.25 * (m.log(
-        (learning_params['temperature_start'] -
-         learning_params['temperature_inf']) /
-        (0.1 * learning_params['temperature_inf'])))
+learning_params['px_temperature_inf'] = 0.05
+learning_params['px_temperature_start'] = 1
+learning_params['px_temperature_decay'] = 1.25 * (m.log(
+        (learning_params['px_temperature_start'] -
+         learning_params['px_temperature_inf']) /
+        (0.1 * learning_params['px_temperature_inf'])))
+    
+learning_params['bm_temperature_inf'] = 0.005
+learning_params['bm_temperature_start'] = 0.5
+learning_params['bm_temperature_decay'] = 1.25 * (m.log(
+        (learning_params['bm_temperature_start'] -
+         learning_params['bm_temperature_inf']) /
+        (0.1 * learning_params['bm_temperature_inf'])))
 
 # 'experimentation', controls degree that profit increases the propensity of that action
-learning_params['expmt'] = 0.95
+learning_params['px_expmt'] = 0.95
+learning_params['bm_expmt'] = 0.50
 
 # how quickly propensities decay. Recency must be greater than expmt/(len(action_set) - 1) 
-learning_params['recency'] = 0.05
+learning_params['px_recency'] = 0.05
+learning_params['bm_recency'] = 0.0475
 
-# epsilon if epsilon-greedy is being used. TO DO: experiment with lower propensity
-# limit below which epsilon-greedy won't consider actions
+# epsilon if epsilon-greedy is being used.
 learning_params['epsilon'] = 0.05
 
 # switches between using the per-period profit or the day-total profit as 
-# reward, either 'day_profit', 'period_profit', 'discounted_profit', or
-# 'kernel_profit'
-learning_params['reward_method'] = 'kernel_profit'
+# reward, either 'day_profit', 'period_profit', 'discounted_profit', 
+# 'kernel_profit', or 'expected_profit'
+learning_params['px_reward_method'] = 'expected_profit'
+learning_params['bm_reward_method'] = 'period_profit'
 
-learning_params['discount'] = 0.3
+learning_params['discount'] = 0.4
 learning_params['kernel_radius'] = 1
 
 # controls the magnitude of the rewards that the agents receive for a given,
 # in the denominator
-learning_params['dampening_factor'] = 3
+learning_params['dampening_factor'] = 2.5
 
 
 ### physical parameters: MW, £marginal/MWh, £/startup, cycles, minimum up-time, 
 ### minimum down-time, tCO2/MWh
 phys_params = {
-    'wind': {'cap': 4250, 'marginal_cost': 0, 'startup_cost': 0, 'min_gen': 0, 'cycles': 0, 'emissions': 0},
-    'ccgt': {'cap': 2600, 'marginal_cost': 39, 'startup_cost': 40000, 'min_gen': 1300, 'cycles': 3, 'emissions': 0.487},
-    'coal': {'cap': 4600, 'marginal_cost': 30, 'startup_cost': 200000, 'min_gen': 2300, 'cycles': 2, 'emissions': 0.87},
-    'nuclear': {'cap': 7000, 'marginal_cost': 10, 'startup_cost': 200000, 'min_gen': 7000, 'cycles': 0, 'emissions': 0},
+    'wind': {'cap': 1000, 'marginal_cost': 0, 'startup_cost': 0, 'min_gen': 0, 'cycles': 0, 'emissions': 0},
+    'ccgt': {'cap': 800, 'marginal_cost': 39, 'startup_cost': 13920, 'min_gen': 400, 'cycles': 3, 'emissions': 0.487},
+    'coal': {'cap': 1800, 'marginal_cost': 30, 'startup_cost': 55440, 'min_gen': 900, 'cycles': 2, 'emissions': 0.87},
+    'nuclear': {'cap': 2400, 'marginal_cost': 10, 'startup_cost': 200000, 'min_gen': 2400, 'cycles': 0, 'emissions': 0},
     }
 
 ### simulation parameters ###
@@ -72,18 +89,21 @@ sim_params['stage_list'] = ['make_px_offer',
                             'update_px_propensities',
                             'update_bm_propensities']
 
-# specify whether the agents use absolute offers or increments on the bid they
-# made during that period in the previous day. 'absolute' or 'increment'
-sim_params['offer_method'] = 'absolute'
+# controls whether mesa stores all variables in the model or limits to critical
+sim_params['verbose_data_collection'] = False
 
 # specifies whether run-time constraints are in effect; 'none', 'soft' for cycling
 # penalties only, or 'all' to include boundedly-rational heuristics
 sim_params['constraints'] = 'all'
 
+# determines whether the agents learn against a fixed or a dynamic imbalance
+# profile, i.e. whether a new set of demand/wind errors are calculated each day
+sim_params['dynamic_imbalance'] = False
+
 # controls whether stochastic additions are made to demand and wind, and their severity
 sim_params['demand_sd'] = 0
 
-sim_params['wind_sd'] = 0.02
+sim_params['wind_sd'] = 0.01
 
 # scales the demand such that total generation capacity = max demand * margin
 sim_params['peak_margin'] = 1.36
@@ -93,7 +113,7 @@ sim_params['date'] = ['2016-03-15', '2016-03-16']
 
 # define number of and types of generators
 sim_params['num_wind'] = 1
-sim_params['num_ccgt'] = 4
+sim_params['num_ccgt'] = 6
 sim_params['num_coal'] = 2
 sim_params['num_nuclear'] = 1
 sim_params['num_gen'] = (
@@ -124,12 +144,13 @@ fixed_params = without_keys(params, variable_params)
 
 results = model.run_simulation(model.MarketModel, 
                                params, 
-                               days = 500, 
+                               days = 150, 
                                show_graphs = True,
                                save_graphs = False,
                                iterate = False,
-                               name = 'BM Test')
+                               name = 'Expected Profit Test')
 
+model.additional_graphs(results, 16, 1000)
 
 
 
