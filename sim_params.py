@@ -150,7 +150,7 @@ results = model.run_simulation(model.MarketModel,
                                iterate = False,
                                name = 'Expected Profit Test')
 
-model.additional_graphs(results, 16, 1000)
+model.additional_graphs(results, 16, 150)
 
 
 
