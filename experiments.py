@@ -36,6 +36,11 @@ def create_kernel(radius, discount):
     return softmax(kernel, 0.2)
 
 
+def moving_average(x, N):
+    
+    return pd.DataFrame(x).rolling(N).mean()[N:]
+
+
 # =============================================================================
 # Autoregressive and mean-reverting forecast error creation
 # =============================================================================
@@ -118,30 +123,12 @@ plt.title('Average Balancing Mechanism Marginal Price over Final 100 Days for {0
 # More attempts at different visualisations
 # =============================================================================
 
-def running_mean(x, N):
-    
-    return pd.DataFrame(x).rolling(N).mean()[N:]
+# like the tracking of avea
 
-def singleAgentOffers(generation, gen_id):
-    
-    single_gen = {}
-    
-    for day in range(len(generation)):
-        single_gen[day] = [[generation[day][period][gen_id][1], generation[day][period][gen_id][2]] for period in range(48)]
-    
-    rolling_successful_offers = {}
-    
-    for period in range(48):
-        rolling_successful_offers[period] = running_mean([single_gen[day][period][1] for day in range(len(generation))], 100)
-    
-    plt.plot(rolling_successful_offers[3])
-    plt.plot(rolling_successful_offers[9])
-    plt.plot(rolling_successful_offers[14])
-    plt.plot(rolling_successful_offers[24])
-    plt.plot(rolling_successful_offers[36])
-    plt.legend(labels = [3, 9, 14, 24, 36])
-    
-    
+
+
+
+
     
 # =============================================================================
 # Experimenting with actions based on expected profits. For some reason, despite
@@ -169,6 +156,31 @@ exp_profits_agent -= min(exp_profits_agent)
 weights = exp_profits_agent/np.linalg.norm(exp_profits_agent, ord = 1)
 
 plt.plot(weights)
+
+
+px_epsilon_inf = 0.01
+px_epsilon_start = 0.1
+px_epsilon_decay = 0.75 * (m.log((px_epsilon_start -px_epsilon_inf) /(0.1 * px_epsilon_inf)))
+days = 500
+px_epsilon = []
+
+for day in range(days):
+    px_epsilon.append(px_epsilon_inf + (px_epsilon_start - px_epsilon_inf) \
+                      * np.exp(-day/(days/px_epsilon_decay)))
+plt.plot(px_epsilon)
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

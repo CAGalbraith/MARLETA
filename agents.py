@@ -56,7 +56,6 @@ class Generator(mesa.Agent):
         self.dampening_factor = params['dampening_factor']
         self.kernel_radius = params['kernel_radius']
         
-        self.epsilon = params['epsilon']
         self.px_recency = params['px_recency']
         self.px_expmt = params['px_expmt']
         
@@ -70,13 +69,22 @@ class Generator(mesa.Agent):
         self.bm_temperature_inf = params['bm_temperature_inf']
         self.bm_temperature_start = params['bm_temperature_start']
         self.bm_temperature_decay = params['bm_temperature_decay']
-
+        
+        self.px_epsilon_inf = params['px_epsilon_inf']
+        self.px_epsilon_start = params['px_epsilon_start']
+        self.px_epsilon_decay = params['px_epsilon_decay']
+        
+        self.bm_epsilon_inf = params['bm_epsilon_inf']
+        self.bm_epsilon_start = params['bm_epsilon_start']
+        self.bm_epsilon_decay = params['bm_epsilon_decay']
         
         # offer_set very important. Limit to marginal_cost or not?
             
-        self.price_offer_set = list(np.linspace(25, 125, 21))
+        self.price_offer_set = list(np.linspace(25, 125, 11))
             
         self.volume_offer_set = list(np.linspace(0.5, 1, 21))
+        
+        self.balancing_mechanism = params['balancing_mechanism']
         
         # list of bm intercept and gradient values
         
@@ -92,6 +100,21 @@ class Generator(mesa.Agent):
         self.px_volume_propensities = np.ones((48, len(self.volume_offer_set)))
         self.bm_intercept_propensities = np.ones((48, len(self.bm_intercept_set)))
         self.bm_gradient_propensities = np.ones((48, len(self.bm_gradient_set)))
+        
+        # if the balancing mechanism is not in play, then volume offers are set
+        # at full capacity
+        
+        if self.balancing_mechanism == False:
+            
+            self.px_volume_propensities = np.zeros((48, len(self.volume_offer_set)))
+            self.px_volume_propensities[-1] = 1
+            
+            self.bm_period_profit = []
+            self.bm_day_profit = []
+            self.bm_intercept_choices = []
+            self.bm_gradient_choices = []
+            self.bm_intercept_props = []
+            self.bm_gradient_props = []
         
         # reward signal scaled to the max profit the generator can make in a 
         # period, to make the reward independent of physical parameters
@@ -176,13 +199,14 @@ class Generator(mesa.Agent):
 
             return
         
-            
-        self.px_temperature = self.px_temperature_inf + (self.px_temperature_start - self.px_temperature_inf) * np.exp(-self.day/(self.days/self.px_temperature_decay)) 
-        
+                    
         self.px_offer = []
         
 
         if self.px_action_method == 'softmax':
+            
+            self.px_temperature = self.px_temperature_inf + (self.px_temperature_start - self.px_temperature_inf) \
+                                  * np.exp(-self.day/(self.days/self.px_temperature_decay)) 
         
             for period in range(48):
                 
@@ -208,15 +232,18 @@ class Generator(mesa.Agent):
         # on a using a kernel to weight the choices near it. Still retains the
         # completely random choice with probability epsilon.
         # Remember to change the size of the actions list if changing radius!
-        
+                                  
         elif self.px_action_method == 'epsilon_kernel':
+            
+            self.px_epsilon = self.px_epsilon_inf + (self.px_epsilon_start - self.px_epsilon_inf) \
+                              * np.exp(-self.day/(self.days/self.px_epsilon_decay)) 
             
             price_kernel = self.create_kernel(2, 0.65)
             volume_kernel = self.create_kernel(2, 0.65)
         
             for period in range(48):
                 
-                if random() > self.epsilon:
+                if random() > self.px_epsilon:
                     
                     max_price_props = []
                     max_volume_props = []
@@ -273,9 +300,12 @@ class Generator(mesa.Agent):
         
         elif self.px_action_method == 'epsilon_greedy':
             
+            self.px_epsilon = self.px_epsilon_inf + (self.px_epsilon_start - self.px_epsilon_inf) \
+                              * np.exp(-self.day/(self.days/self.px_epsilon_decay)) 
+            
             for period in range(48):
                 
-                if random() > self.epsilon:
+                if random() > self.px_epsilon:
                     
                     max_price_props = []
                     max_volume_props = []
@@ -340,7 +370,9 @@ class Generator(mesa.Agent):
         
         self.bm_temperature = self.bm_temperature_inf + (self.bm_temperature_start - self.bm_temperature_inf) \
                               * np.exp(-self.day/(self.days/self.bm_temperature_decay)) 
-
+          
+        self.bm_epsilon = self.bm_epsilon_inf + (self.bm_epsilon_start - self.bm_epsilon_inf) \
+                          * np.exp(-self.day/(self.days/self.bm_epsilon_decay)) 
 
         for period in range(48):
             
@@ -355,7 +387,7 @@ class Generator(mesa.Agent):
             
             elif self.bm_action_method == 'epsilon_greedy':
                 
-                if random() > self.epsilon:
+                if random() > self.bm_epsilon:
                     
                     max_intercept_props = []
                     
@@ -369,7 +401,7 @@ class Generator(mesa.Agent):
                     
                     self.bm_intercept_choices[period] = choices(self.bm_intercept_set)[0]
                 
-                if random() > self.epsilon:
+                if random() > self.bm_epsilon:
                     
                     max_gradient_props = []
                     
@@ -437,17 +469,18 @@ class Generator(mesa.Agent):
             self.bm_offers = []
             self.bm_intercept_choices = []
             self.bm_gradient_choices = []
+            self.startup_penalties = list(np.zeros(48))
             return
         
-        startup_penalties = []
+        self.startup_penalties = []
         
         for period, dispatch in enumerate(self.generation[1:]):
             if (self.generation[period + 1][0] != 0) and (self.generation[period][0] == 0):
-                startup_penalties.append(self.startup_cost)
+                self.startup_penalties.append(self.startup_cost)
             else:
-                startup_penalties.append(0)
+                self.startup_penalties.append(0)
                 
-        startup_penalties.append(0)
+        self.startup_penalties.append(0)
         
         # remember that the price_offer here is not constrained to 1 if nuclear,
         # hence why profit is calculated using the figures from self.generation
@@ -455,7 +488,7 @@ class Generator(mesa.Agent):
         
         self.px_period_profit = np.multiply(np.subtract([x[1] for x in self.generation], 
                                                      self.marginal_cost), [x[0] for x in self.generation])
-        self.px_period_profit -= np.array(startup_penalties)
+        self.px_period_profit -= np.array(self.startup_penalties)
         
         self.px_day_profit = sum(self.px_period_profit)
         
@@ -465,20 +498,26 @@ class Generator(mesa.Agent):
         # 0, then generator was not dispatched in the px and hence does not
         # participate in the balancing mechanism
         
-        self.bm_available_volume = {}
+        if self.balancing_mechanism == True:
+            
+            self.bm_available_volume = {}
+            
+            for period in range(48):
+                
+                if (self.generation[period][0] == 0) or (self.fuel == 'nuclear'):
+                    
+                    self.bm_available_volume[period] = [0, 0]
+                
+                else:
+                    
+                    self.bm_available_volume[period] = [self.capacity/2 - self.generation[period][0],
+                                                        self.generation[period][0] - self.min_gen/2]
+                
+            self.bm_bids, self.bm_offers = self.construct_bm_ladder()
         
-        for period in range(48):
+        else:
             
-            if (self.generation[period][0] == 0) or (self.fuel == 'nuclear'):
-                
-                self.bm_available_volume[period] = [0, 0]
-            
-            else:
-                
-                self.bm_available_volume[period] = [self.capacity/2 - self.generation[period][0],
-                                                    self.generation[period][0] - self.min_gen/2]
-            
-        self.bm_bids, self.bm_offers = self.construct_bm_ladder()
+            self.day += 1
                     
         
         # convert period profit array into a reward array, that penalises generators
@@ -488,12 +527,16 @@ class Generator(mesa.Agent):
         # now, will need to fiddle with value
         
         self.px_reward = deepcopy(self.px_period_profit)
+        
+        if len(px_marginal_price) != 48:
+            print(px_marginal_price)
+            raise Exception
                 
         for period in range(48):
             if self.generation[period][0] == 0:
                 self.px_reward[period] += (px_marginal_price[period] - self.px_price_offer[period]) * self.capacity/2
-                if (len(startup_penalties) - startup_penalties.count(0)) > self.cycles:
-                    self.px_reward[period] -= (len(startup_penalties) - startup_penalties.count(0)) * self.capacity * 2
+                if (len(self.startup_penalties) - self.startup_penalties.count(0)) > self.cycles:
+                    self.px_reward[period] -= (len(self.startup_penalties) - self.startup_penalties.count(0)) * self.capacity * 2
         
         # add offer statistics and average profit to expected_profit dictionary
         # offer: [offer frequency, offer successes, success ratio, 
@@ -520,6 +563,8 @@ class Generator(mesa.Agent):
             self.expected_profits[self.px_price_offer[period]][period][7] = self.expected_profits[self.px_price_offer[period]][period][6] * self.expected_profits[self.px_price_offer[period]][period][2]
         
         # updates propensities according to Roth-Erev
+        
+        self.px_price_propensities = deepcopy(self.px_price_propensities)
         
         if self.px_reward_method == 'period_profit':
         
@@ -639,6 +684,10 @@ class Generator(mesa.Agent):
         
         self.bm_day_profit = sum(self.bm_period_profit)
         
+        
+        self.px_volume_propensities = deepcopy(self.px_volume_propensities)
+        self.bm_intercept_propensities = deepcopy(self.bm_intercept_propensities)
+        self.bm_gradient_propensities = deepcopy(self.bm_gradient_propensities)
         
         if self.bm_reward_method == 'kernel_profit':
             

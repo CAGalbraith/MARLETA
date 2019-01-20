@@ -69,7 +69,7 @@ class MarketModel(mesa.Model):
                                         ['coal']*self.params['num_coal'],
                                         ['ccgt']*self.params['num_ccgt']]
                                             for item in sublist], 
-                                            range(self.params['num_gen']))] 
+                                            range(self.params['num_agents']))] 
     
         for agent in generators:
             self.schedule.add(agent)
@@ -79,9 +79,16 @@ class MarketModel(mesa.Model):
         # TODO: standardise whether we're dealing in MW or MWh, these 2s 
         # everywhere are getting confusing
         
-        self.demand = self.system_params['Demand']['Transmission Demand'] * 2  
-        self.demand *= max_capacity / (params['peak_margin'] * max(self.demand))
-        self.params['demand_profile'] = self.demand
+        if params['synthetic_demand'] == 0:
+        
+            self.demand = self.system_params['Demand']['Transmission Demand'] * 2  
+            self.demand *= max_capacity / (params['peak_margin'] * max(self.demand))
+            self.params['demand_profile'] = self.demand
+            
+        else:
+            
+            self.demand = np.array(params['synthetic_demand'])
+            self.params['demand_profile'] = self.demand
 
         # initialise supply agents; [market share, forecast error, strategy]
         # TODO: initialise suppliers using params['num_suppliers']
@@ -112,39 +119,34 @@ class MarketModel(mesa.Model):
             
         
         # initialise Mesa's datacollector functionality
+
+        agent_reporters = {'px_day_profit': 'px_day_profit',
+                           'bm_day_profit': 'bm_day_profit'}
+        model_reporters = {'px_dispatch': 'px_dispatch',
+                           'generation': 'generation',
+                           'imbalance': 'imbalance',
+                           'px_marginal_price': 'px_marginal_price',
+                           'bm_marginal_price': 'bm_marginal_price',
+                           'system_costs': 'system_costs',
+                           'gen_labels': 'gen_labels'}
         
         if params['verbose_data_collection'] == True:
         
-            self.datacollector = DataCollector(
-                    agent_reporters = {'px_day_profit': 'px_day_profit',
-                                       'px_period_profit': 'px_period_profit',
-                                       'px_price_props': 'px_price_propensities',
-                                       'px_volume_props': 'px_volume_propensities',
-                                       'bm_intercept_props' : 'bm_intercept_propensities',
-                                       'bm_gradient_props': 'bm_gradient_propensities',
-                                       'expected_profits': 'expected_profits',
-                                       'bm_period_profit': 'bm_period_profit',
-                                       'bm_day_profit': 'bm_day_profit',
-                                       'bm_intercept_choices': 'bm_intercept_choices',
-                                       'bm_gradient_choices': 'bm_gradient_choices'},
-                    model_reporters = {'px_dispatch': 'px_dispatch',
-                                       'offer_curtailments': 'constrained_schedule',
-                                       'gen_labels': 'gen_labels',
-                                       'generation': 'generation',
-                                       'imbalance': 'imbalance',
-                                       'px_marginal_price': 'px_marginal_price',
-                                       'bm_marginal_price': 'bm_marginal_price'})
-        else:
+       
+            agent_reporters.update({'px_period_profit': 'px_period_profit',
+                                    'px_volume_props': 'px_volume_propensities',
+                                    'px_price_props': 'px_price_propensities',
+                                    'startup_penalties': 'startup_penalties',
+                                    'bm_intercept_props' : 'bm_intercept_propensities',
+                                    'bm_gradient_props': 'bm_gradient_propensities',
+                                    'bm_period_profit': 'bm_period_profit',
+                                    'expected_profits': 'expected_profits',
+                                    'bm_intercept_choices': 'bm_intercept_choices',
+                                    'bm_gradient_choices': 'bm_gradient_choices'})
+            model_reporters.update({'offer_curtailments': 'constrained_schedule',})
             
-            self.datacollector = DataCollector(
-                    agent_reporters = {'px_day_profit': 'px_day_profit',
-                                       'bm_day_profit': 'bm_day_profit'},
-                    model_reporters = {'px_dispatch': 'px_dispatch',
-                                       'gen_labels': 'gen_labels',
-                                       'generation': 'generation',
-                                       'imbalance': 'imbalance',
-                                       'px_marginal_price': 'px_marginal_price',
-                                       'bm_marginal_price': 'bm_marginal_price'})
+        self.datacollector = DataCollector(agent_reporters = agent_reporters,
+                                           model_reporters = model_reporters)
 
 
     def constrained_scheduler(self, unconstrained_schedule, period):
@@ -297,7 +299,7 @@ class MarketModel(mesa.Model):
         
         if 0 in accepted_offers:
             
-            self.px_marginal_price[period] = list(offers.items())[accepted_offers.index(0)][1][1]
+            self.px_marginal_price.append(list(offers.items())[accepted_offers.index(0)][1][1])
             
             marginal_volume = demand_forecast - cumulative_offers[accepted_offers.index(0) - 1]
             marginal_gen = self.schedule.agents[list(offers.items())[accepted_offers.index(0)][0]]
@@ -372,6 +374,9 @@ class MarketModel(mesa.Model):
                     accepted_offers[0] = (list(offers.items())[0][1][0] - marginal_volume)/list(offers.items())[0][1][0]
                     marginal_volume = 0
         
+        else:
+            
+            self.px_marginal_price.append(list(offers.items())[-1][1][1])
         
         # TODO: store imbalance as two separate components, due to uncertainty
         # demand forecasts and uncertainty from intermittent generators.
@@ -508,8 +513,9 @@ class MarketModel(mesa.Model):
         # clear the market according to cheapest offers per period
         
         self.px_period_offers = OrderedDict()
-        self.px_marginal_price = OrderedDict()
+        self.px_marginal_price = []
         self.bm_marginal_price = []
+        self.system_cost = []
         self.imbalance = []
         
         self.constrained_schedule = OrderedDict()
@@ -609,78 +615,97 @@ class MarketModel(mesa.Model):
         
         ### BALANCING MECHANISM CLEARING ###
         
-        bm_day_offers = {}
-        bm_day_bids = {}
-        
-        self.bm_period_offers = OrderedDict()
-        self.bm_period_bids = OrderedDict()
-        
-        self.bm_schedule = OrderedDict()
-        
-        for agent in self.schedule.agents:
+        if self.params['balancing_mechanism'] == True:
             
-            if (agent.fuel != 'wind') and (agent.fuel != 'nuclear'):
+            bm_day_offers = {}
+            bm_day_bids = {}
+            
+            self.bm_period_offers = OrderedDict()
+            self.bm_period_bids = OrderedDict()
+            
+            self.bm_schedule = OrderedDict()
+            
+            for agent in self.schedule.agents:
                 
-                bm_day_offers[agent.id] = agent.bm_offers
-                bm_day_bids[agent.id] = agent.bm_bids
-        
-        for period in range(48):
+                if (agent.fuel != 'wind') and (agent.fuel != 'nuclear'):
+                    
+                    bm_day_offers[agent.id] = agent.bm_offers
+                    bm_day_bids[agent.id] = agent.bm_bids
             
-            self.bm_period_offers[period] = []
-            self.bm_period_bids[period] = []
-        
-            for gen_id in bm_day_offers.keys():
-                for action in bm_day_offers[gen_id][period]:
-                    if action[1] != 0:
-                        self.bm_period_offers[period].append(action)
-                for action in bm_day_bids[gen_id][period]:
-                    if action[1] != 0:
-                        self.bm_period_bids[period].append(action)
+            for period in range(48):
+                
+                self.bm_period_offers[period] = []
+                self.bm_period_bids[period] = []
             
-            # first shuffles the list so that individual generators are not
-            # favoured for having proximate prices between their offers
+                for gen_id in bm_day_offers.keys():
+                    for action in bm_day_offers[gen_id][period]:
+                        if action[1] != 0:
+                            self.bm_period_offers[period].append(action)
+                    for action in bm_day_bids[gen_id][period]:
+                        if action[1] != 0:
+                            self.bm_period_bids[period].append(action)
+                
+                # first shuffles the list so that individual generators are not
+                # favoured for having proximate prices between their offers
+                
+                shuffle(self.bm_period_offers[period])
+                shuffle(self.bm_period_bids[period])
+                
+                # sorts by offer price   
+                self.bm_period_offers[period] = sorted(self.bm_period_offers[period], 
+                                                       key = lambda x: (x[2]))
+                
+                # bids are sorted in decending order, because the SO prefers those
+                # who would pay the most to lower their output first
+                self.bm_period_bids[period] = sorted(self.bm_period_bids[period], 
+                                                     key = lambda x: (x[2]),
+                                                     reverse = True)
             
-            shuffle(self.bm_period_offers[period])
-            shuffle(self.bm_period_bids[period])
+                
+                accepted_bm_actions = self.clear_balancing_market(self.imbalance[period],
+                                                                  self.bm_period_offers[period],
+                                                                  self.bm_period_bids[period],
+                                                                  period)
+                
             
-            # sorts by offer price   
-            self.bm_period_offers[period] = sorted(self.bm_period_offers[period], 
-                                                   key = lambda x: (x[2]))
+                # accepted_bm_actions of the form [agent.id, volume, price], in 
+                # order of price
+                            
+                for action in accepted_bm_actions:
+                    self.generation[period][action[0]][3] += action[1]
+                    self.generation[period][action[0]][4].append(action)
+                    self.generation[period][action[0]][5] += action[1]
+                
+                self.bm_schedule[period] = accepted_bm_actions
             
-            # bids are sorted in decending order, because the SO prefers those
-            # who would pay the most to lower their output first
-            self.bm_period_bids[period] = sorted(self.bm_period_bids[period], 
-                                                 key = lambda x: (x[2]),
-                                                 reverse = True)
-        
+            # calculates the system cost for each period of the day, equal to 
+            # the total cost of fuel burnt, the startup costs, the bm costs
+            # to the SO, and the carbon tax if applicable
+            # TODO: add carbon tax parameter, using emissions
             
-            accepted_bm_actions = self.clear_balancing_market(self.imbalance[period],
-                                                              self.bm_period_offers[period],
-                                                              self.bm_period_bids[period],
-                                                              period)
+            fuel_costs = np.array([sum([self.generation[period][gen_id][5] * self.schedule.agents[gen_id].marginal_cost 
+                                    for gen_id in range(self.params['num_agents'])]) for period in range(48)])
             
-        
-            # accepted_bm_actions of the form [agent.id, volume, price], in 
-            # order of price
-                        
-            for action in accepted_bm_actions:
-                self.generation[period][action[0]][3] += action[1]
-                self.generation[period][action[0]][4].append(action)
-                self.generation[period][action[0]][5] += action[1]
+            startup_costs = np.array([sum([self.schedule.agents[gen_id].startup_penalties[period]
+                                      for gen_id in range(self.params['num_agents'])]) for period in range(48)])
             
-            self.bm_schedule[period] = accepted_bm_actions
-        
-        
-        # update generator bm_mechanism propensities                
-        
-        self.schedule.step(self.params['stage_list'][2],
-                           self.generation)
+            bm_SO_costs = np.array([sum([sum([self.generation[period][gen_id][4][i][1] * self.generation[period][gen_id][4][i][2] 
+                                    for i in range(len(self.generation[period][gen_id][4]))]) 
+                                    for gen_id in range(self.params['num_agents'])])
+                                    for period in range(48)])
+            
+            self.system_costs = fuel_costs + startup_costs + bm_SO_costs
+            
+            # update generator bm_mechanism propensities        
+            
+            self.schedule.step(self.params['stage_list'][2],
+                               self.generation)
         
         self.datacollector.collect(self)
     
 
 
-def running_mean(x, N):
+def moving_average(x, N):
     
     return pd.DataFrame(x).rolling(N).mean()[N:]
             
@@ -707,10 +732,18 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
     px_day_profit = model.datacollector.get_agent_vars_dataframe()['px_day_profit']
     bm_day_profit = model.datacollector.get_agent_vars_dataframe()['bm_day_profit']
     
+    # model variables from datacollector
+    px_dispatch = model.datacollector.get_model_vars_dataframe()['px_dispatch']
+    generation = model.datacollector.get_model_vars_dataframe()['generation']
+    imbalance = model.datacollector.get_model_vars_dataframe()['imbalance']
+    bm_marginal_price = model.datacollector.get_model_vars_dataframe()['bm_marginal_price']
+    px_marginal_price = model.datacollector.get_model_vars_dataframe()['px_marginal_price']
+    system_costs = model.datacollector.get_model_vars_dataframe()['system_costs']
+    gen_labels = model.datacollector.get_model_vars_dataframe()['gen_labels']
+    
     if params['verbose_data_collection'] == True:    
         
         px_period_profit = model.datacollector.get_agent_vars_dataframe()['px_period_profit']
-        px_price_props = model.datacollector.get_agent_vars_dataframe()['px_price_props']
         px_volume_props = model.datacollector.get_agent_vars_dataframe()['px_volume_props']
         bm_intercept_props = model.datacollector.get_agent_vars_dataframe()['bm_intercept_props']
         bm_gradient_props = model.datacollector.get_agent_vars_dataframe()['bm_gradient_props']
@@ -718,22 +751,16 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
         bm_period_profit = model.datacollector.get_agent_vars_dataframe()['bm_period_profit']
         bm_intercept_choices = model.datacollector.get_agent_vars_dataframe()['bm_intercept_choices']
         bm_gradient_choices = model.datacollector.get_agent_vars_dataframe()['bm_gradient_choices']
-    
-    # model variables from datacollector
-    px_dispatch = model.datacollector.get_model_vars_dataframe()['px_dispatch']
-    generation = model.datacollector.get_model_vars_dataframe()['generation']
-    imbalance = model.datacollector.get_model_vars_dataframe()['imbalance']
-    bm_marginal_price = model.datacollector.get_model_vars_dataframe()['bm_marginal_price']
-    px_marginal_price = model.datacollector.get_model_vars_dataframe()['px_marginal_price']
-    gen_labels = model.datacollector.get_model_vars_dataframe()['gen_labels']
-    
-    if params['verbose_data_collection'] == True:
-        
+        px_price_props = model.datacollector.get_agent_vars_dataframe()['px_price_props']
+        startup_penalties = model.datacollector.get_agent_vars_dataframe()['startup_penalties']
+
         offer_curtailments = model.datacollector.get_model_vars_dataframe()['offer_curtailments']
-        
-        
 
     
+        
+
+        
+   
     # The below code generates data averaging the dispatch mix, average
     # bid price, and peak bid price of dispatched generators 
     # per period averaged over the final 100 days of the simulation, along with
@@ -750,9 +777,9 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
         
         for day in range(100):
             for agent_id in gen_labels.iloc[-1].keys():
-                all_gen.iloc[day][agent_id] = generation.iloc[-day][period][agent_id][5]
-                all_offers.iloc[day][agent_id] = np.where(generation.iloc[-day][period][agent_id][1] != 0, 
-                                                          generation.iloc[-day][period][agent_id][2],
+                all_gen.iloc[day][agent_id] = generation.iloc[-1 -day][period][agent_id][5]
+                all_offers.iloc[day][agent_id] = np.where(generation.iloc[-1 -day][period][agent_id][1] != 0, 
+                                                          generation.iloc[-1 -day][period][agent_id][2],
                                                           np.nan)
         
         all_gen.columns = all_gen.columns.to_series().apply(lambda gen: gen_labels.iloc[-1][gen][0])
@@ -770,9 +797,11 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
         avg_offer_price = avg_offer_price.append(avg_offers, ignore_index = True)
         peak_offer_price = peak_offer_price.append(peak_offers, ignore_index = True)
         
-        avg_bm_marginal_price = avg_bm_marginal_price.append([[bm_marginal_price.iloc[-1][period][0], np.mean([bm_marginal_price.iloc[-day][period][1] for day in range(100)])]], ignore_index = True)
+        if params['balancing_mechanism'] == True: 
+            avg_bm_marginal_price = avg_bm_marginal_price.append([[bm_marginal_price.iloc[-1][period][0], np.mean([bm_marginal_price.iloc[-day][period][1] for day in range(50)])]], ignore_index = True)
     
-    avg_bm_marginal_price.columns = ['Direction', 'Price']
+    if params['balancing_mechanism'] == True:
+        avg_bm_marginal_price.columns = ['Direction', 'Price']
     
     rolling_offers_peak = pd.DataFrame({agent_id: np.zeros(days) for agent_id in gen_labels.iloc[-1].keys()})
     rolling_offers_off = pd.DataFrame({agent_id: np.zeros(days) for agent_id in gen_labels.iloc[-1].keys()})
@@ -800,8 +829,8 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
     rolling_offers_peak.columns = rolling_offers_peak.columns.to_series().apply(lambda gen: gen_labels.iloc[-1][gen][0])
     rolling_offers_peak = rolling_offers_peak.groupby(rolling_offers_peak.columns, axis = 1).mean()
             
-    rolling_offers_off = running_mean(rolling_offers_off, 25)
-    rolling_offers_peak = running_mean(rolling_offers_peak, 25)
+    rolling_offers_off = moving_average(rolling_offers_off, 25)
+    rolling_offers_peak = moving_average(rolling_offers_peak, 25)
     
     # calculates proportional dispatch values
     
@@ -827,58 +856,41 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
     
     rms_dispatch_error = m.sqrt(sum(dispatch_error['total']) ** 2)
     
+    results = {'px_day_profit': px_day_profit,
+               
+               'px_dispatch': px_dispatch,
+               'demand': model.demand,
+               'bm_day_profit': bm_day_profit,
+               'gen_labels': gen_labels,
+               'generation': generation,
+               'imbalance': imbalance,
+               'bm_marginal_price': bm_marginal_price,
+               'px_marginal_price': px_marginal_price,
+               'system_costs': system_costs,
+               'avg_bm_marginal_price': avg_bm_marginal_price,
+               'avg_offer_price': avg_offer_price,
+               'rms_dispatch_error': rms_dispatch_error}
+    
     if params['verbose_data_collection'] == True:
         
-        results = {'px_day_profit': px_day_profit,
-                   'px_period_profit': px_period_profit,
-                   'px_price_props': px_price_props,
-                   'px_volume_props': px_volume_props,
-                   'bm_intercept_props': bm_intercept_props,
-                   'bm_gradient_props': bm_gradient_props,
-                   'bm_intercept_choices': bm_intercept_choices,
-                   'bm_gradient_choices': bm_gradient_choices,
-                   'px_dispatch': px_dispatch,
-                   'demand': model.demand,
-                   'offer_curtailments': offer_curtailments,
-                   'expected_profits': expected_profits,
-                   'bm_period_profit': bm_period_profit,
-                   'bm_day_profit': bm_day_profit,
-                   'gen_labels': gen_labels,
-                   'generation': generation,
-                   'imbalance': imbalance,
-                   'bm_marginal_price': bm_marginal_price,
-                   'px_marignal_price': px_marginal_price,
-                   'avg_bm_marginal_price': avg_bm_marginal_price,
-                   'avg_offer_price': avg_offer_price,
-                   'avg_fuel_mix': avg_fuel_mix,
-                   'rolling_off_price': rolling_offers_off,
-                   'rolling_peak_price': rolling_offers_peak,
-                   'dispatch_error': dispatch_error,
-                   'prop_dispatch_error': prop_dispatch_error,
-                   'rms_dispatch_error': rms_dispatch_error,
-                   'abs_prop_dispatch_error': abs_prop_dispatch_error}
-    else:
-        
-        results = {'px_day_profit': px_day_profit,
-                   'px_dispatch': px_dispatch,
-                   'demand': model.demand,
-                   'bm_day_profit': bm_day_profit,
-                   'gen_labels': gen_labels,
-                   'generation': generation,
-                   'imbalance': imbalance,
-                   'bm_marginal_price': bm_marginal_price,
-                   'px_marignal_price': px_marginal_price,
-                   'avg_bm_marginal_price': avg_bm_marginal_price,
-                   'avg_offer_price': avg_offer_price,
-                   'avg_fuel_mix': avg_fuel_mix,
-                   'rolling_off_price': rolling_offers_off,
-                   'rolling_peak_price': rolling_offers_peak,
-                   'dispatch_error': dispatch_error,
-                   'prop_dispatch_error': prop_dispatch_error,
-                   'rms_dispatch_error': rms_dispatch_error,
-                   'abs_prop_dispatch_error': abs_prop_dispatch_error}
-        
-    
+        results.update({'px_period_profit': px_period_profit,
+                        'px_price_props': px_price_props,
+                        'px_volume_props': px_volume_props,
+                        'bm_intercept_props': bm_intercept_props,
+                        'bm_gradient_props': bm_gradient_props,
+                        'bm_intercept_choices': bm_intercept_choices,
+                        'bm_gradient_choices': bm_gradient_choices,
+                        'offer_curtailments': offer_curtailments,
+                        'expected_profits': expected_profits,
+                        'bm_period_profit': bm_period_profit,
+                        'rolling_off_price': rolling_offers_off,
+                        'rolling_peak_price': rolling_offers_peak,
+                        'abs_prop_dispatch_error': abs_prop_dispatch_error,
+                        'prop_dispatch_error': prop_dispatch_error,
+                        'dispatch_error': dispatch_error,
+                        'avg_fuel_mix': avg_fuel_mix,
+                        'startup_penalties': startup_penalties})
+  
     
     if show_graphs == True:
         
@@ -887,8 +899,8 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
         
         fig1 = plt.figure(1)
         ax1 = plt.subplot(111)
-        for i in range(params['num_gen']):
-            ax1.plot(range(days - 25), running_mean(px_day_profit[:,i], 25)/1000,
+        for i in range(params['num_agents']):
+            ax1.plot(range(days - 25), moving_average(px_day_profit[:,i], 25)/1000,
                     color = gen_labels[days-1][i][2],
                     label = gen_labels[days-1][i][0:2])
         ax1.set(title = '25-day MA Profit for Each Generator per Iteration',
@@ -1061,13 +1073,14 @@ def run_simulation(model_class, params, days, show_graphs = False, save_graphs =
 
 
 
-def additional_graphs(results, num_gen, days):
+def additional_graphs(results, num_agents, days, agent_id):
     
     avg_bm_marginal_price = results['avg_bm_marginal_price']
-    sbp = results['bm_marginal_price']
+    bm_price = results['bm_marginal_price']
     imbal = results['imbalance']
     bm_day_profit = results['bm_day_profit']
     
+    plt.figure()
     avg_bm_marginal_price['Period'] = np.linspace(0, 47, 48)
     direction = np.array(avg_bm_marginal_price['Direction'])
     color = np.where(direction == 0, 'r', 'b')
@@ -1079,32 +1092,272 @@ def additional_graphs(results, num_gen, days):
              xticks = list(range(0, 47, 2)),
              xticklabels = list(range(0, 47, 2)),
              ylabel = 'Price (£/MWh)', 
-             title = 'Average Balancing Mechanism Marginal Price over Final 100 Days');
+             title = 'Average Balancing Mechanism Marginal Price over Final 50 Days');
     ax12.legend(handles = [red, blue])
     
     plt.plot([x for x in imbal[days - 1]])
     
+    
+    for period in [4, 14, 26, 40]:
+        
+        if bm_price[days - 1][period][0] == 1:
+            
+            plt.figure()
+            ssp = [bm_price[day][period][1] for day in range(days)]
+            plt.title('25-Day MA SSP for Period {0}'.format(period))
+            plt.xlabel('Iteration (Day)')
+            plt.ylabel('Price (£/MWh)')
+            plt.plot(moving_average(ssp, 25))
+        
+        else:
+            
+            plt.figure()
+            sbp = [bm_price[day][period][1] for day in range(days)]
+            plt.title('25-Day MA SBP for Period {0}'.format(period))
+            plt.xlabel('Iteration (Day)')
+            plt.ylabel('Price (£/MWh)')
+            plt.plot(moving_average(sbp, 25))
+    
     plt.figure()
-    sbp_long = []
-    for _ in sbp:
-        if _[30][0] == 1:
-            sbp_long.append(_[30][1])
-    plt.title('SBP for Period 30')
+    ax1 = plt.subplot()
+    for i in range(2,num_agents):
+        ax1.plot(range(days - 100), moving_average(bm_day_profit[i::num_agents], 100),
+                color = results['gen_labels'][days-1][i][2],
+                label = [results['gen_labels'][days-1][i][0], i])
+    ax1.set(title = '100-Day MA BM Profits',
+            xticks = list(range(0, days, 250)),
+            xticklabels = list(range(0, days, 250)),
+            xlabel = 'Iteration (Day)',
+            ylabel = 'Profit (£)')
+    box = ax1.get_position()
+    ax1.set_position([box.x0, box.y0, box.width * 0.8, box.height])
+    ax1.legend(loc = 'center left', bbox_to_anchor = (1, 0.5))
+    fig1 = ax1.get_figure()
     
-    plt.plot(sbp_long)
+
+
+def px_strategy_evolution(results, agent_id, num_agents, days, step_size, name):
+    """ Creates a series of bar charts illustrating the evolution of the px
     
-    plt.figure()        
-    sbp_short = []
-    for _ in sbp:
-        if _[4][0] == 0:
-            sbp_short.append(_[4][1])
-    plt.title('SBP for period 4')
+    offer with the highest propensity for a given agent every step_size days,
+    saving them to a directory ready to be made into a gif. Also the evolution
+    of the bm intercept and gradient, if requested.
+    """
     
-    plt.plot(sbp_short)
+    px_props = results['px_price_props']
     
+    px_props_list = px_props[((step_size - 1) * num_agents + agent_id):((days + step_size - 1) * num_agents + agent_id):(step_size * num_agents)]
+    
+    px_max_props = pd.DataFrame.from_records(px_props_list)
+    
+    # converts max_prop argument to price offer. Remember to change with offer_set
+    px_max_props_df = px_max_props.applymap(lambda x: x.argmax()).transpose()
+    px_max_props_df = px_max_props_df.applymap(lambda x: 25 + 5*x)
+
+    for day in range(int(days/step_size)):
+        fig = plt.figure(day);
+        ax = px_max_props_df[day].plot.bar();
+        ax.set(xlabel = 'Period',
+               xticks = list(range(0, 47, 2)),
+               xticklabels = list(range(0, 47, 2)),
+               yticks = list(np.linspace(5, 125, 13)),
+               yticklabels = list(np.linspace(5, 125, 13)),
+               ylabel = 'PX Price Offer', 
+               title = 'Evolution of Preferred PX Offer for Agent {0} - {1}, Day {2}'.format(agent_id, name, day*step_size));
+        fig = ax.get_figure();
+        fig.savefig('Strategy Evolutions/{0}/{1}.jpg'.format(name, day), dpi = 200)
+        plt.close()
+        pass;
+
+
+
+def bm_ladder_evolution(results, agent_id, period):
+    """ Accepts results, an agent, and a period; returns the evolution of their
+    
+    bm intercept and gradient choices, as well as an averaged bid ladder over 
+    the final 100 days.
+    """ 
+    
+    days = len(results['generation'])
+    intercept_choices = [results['bm_intercept_choices'][day][agent_id][period] for day in range(days)]
+    gradient_choices = [results['bm_gradient_choices'][day][agent_id][period] for day in range(days)]
+    
+    # for a given agent and period, tracks their gradient and intercept choices
+    # through the simulation
+    
+    rolling_intercept_choices = moving_average(intercept_choices, 25)
     plt.figure()
-    ax1 = bm_day_profit[2::num_gen].plot()
-    ax1.set(title = 'Daily BM Profits of Agent 2')
+    plt.plot(rolling_intercept_choices)
+    plt.title('25-Day MA of BM Bid/Offer Ladder Intercept Choices for Agent {0}, Period {1}'.format(agent_id, period))
+    plt.xlabel('Iteration (Day)')
+    plt.ylabel('Price (£/MWh)')
+    
+    rolling_gradient_choices = moving_average(gradient_choices, 25)
+    plt.figure()
+    plt.plot(rolling_gradient_choices)
+    plt.title('25-Day MA of BM Bid/Offer Ladder Gradient Choices for Agent {0}, Period {1}'.format(agent_id, period))
+    plt.xlabel('Iteration (Day)')
+    plt.ylabel('Price Gradient (£/MWh^2)')
+    
+    # in order to give some sort of converged ladder for a given period, average
+    # out the intercept and gradient choices for the last 50 days and construct
+    # it from that
+    
+    average_intercept = np.mean(np.array([intercept_choices[-day] for day in range(50)]))
+    average_gradient = np.mean(np.array([gradient_choices[-day] for day in range(50)]))
+    
+    bid_offer_ladder = [average_intercept + i * average_gradient for i in range(-5, 6)]
+    
+    fig, ax = plt.subplots()
+    plt.scatter(y = bid_offer_ladder, x = ['min_gen', '-50%', '-25%', '-10%', '-5%', 'PX Dispatch',
+                                           '+5%', '+10%', '+25%', '+50%', 'max_gen'])
+    plt.xticks(rotation = 45)
+    plt.ylabel('Offer Price (£/MWh)')
+    ax.set_axisbelow(True)
+    plt.title('Average BM Bid/Offer Ladder for Agent {0}, Period {1}'.format(agent_id, period))
+    ax.grid()
+
+
+
+def individual_offers(results, agent_ids, periods, one_gen_per_graph):
+    """ Accepts the results of a simulation run, a list of agent_ids, and a list
+    
+    of periods over which to compare the evolution of the successful offers, 
+    over a 50-day moving average. one_gen_per_graph is a Bool that specifies 
+    whether to plot one agent over the list of periods per graph, or one period 
+    for all agents per graph.
+    """
+    
+    generation = results['generation']
+    
+    if one_gen_per_graph == True:
+        
+        for agent_id in agent_ids:
+            
+            plt.figure()
+            single_gen = {}
+            
+            for day in range(len(generation)):
+                single_gen[day] = [[generation[day][period][agent_id][1], generation[day][period][agent_id][2]] for period in periods]
+            
+            rolling_offers = {}
+            
+            for i, period in enumerate(periods):
+                
+                rolling_offers[period] = moving_average([single_gen[day][i][1] for day in range(len(generation))], 100)
+                plt.plot(rolling_offers[period])
+        
+            plt.legend(labels = periods)
+            plt.title('100-Day MA PX Offers for Generator {0} Across Periods {1}'.format(agent_id, periods))
+            plt.xlabel('Iteration (Day)')
+            plt.ylabel('Price (£/MWh)')
+            
+    else:
+        
+        for period in periods:
+            
+            plt.figure()
+            single_period = {}
+            
+            for day in range(len(generation)):
+                single_period[day] = [[generation[day][period][agent_id][1], generation[day][period][agent_id][2]] for agent_id in agent_ids]
+            
+            rolling_offers = {}
+            
+            for i, agent_id in enumerate(agent_ids):
+                
+                rolling_offers[agent_id] = moving_average([single_period[day][i][1] for day in range(len(generation))], 100)
+                plt.plot(rolling_offers[agent_id])
+            
+            plt.legend(labels = agent_ids)
+            plt.title('100-Day MA PX Offers for Period {0} for Agents {1}'.format(period, agent_ids))
+            plt.xlabel('Iteration (Day)')
+            plt.ylabel('Price (£/MWh)')
+
+
+def system_cost_graphs(results):
+    """ Generates graphs of the system cost and price in various forms.
+    
+    """
+    
+    # TODO: differentiate between the marginal px system price, as given here, 
+    # and the average price per MWh, which may be more useful.
+    
+    system_costs = results['system_costs']
+    demand = results['demand']
+    
+    daily_system_costs = [sum(period_costs) for period_costs in system_costs]
+    
+    system_costs_MWh = [[system_costs[day][period]/demand[period] for period in range(48)] 
+                              for day in range(len(system_costs))]
+    
+    daily_avg_system_costs_MWh = [sum(period_costs)/48 for period_costs in system_costs_MWh]
+    
+    
+    avg_system_period_cost = [np.mean(np.array([system_costs.iloc[-day][period] for day in range(100)])) 
+                              for period in range(48)]
+    
+    avg_system_period_cost_MWh = np.array(avg_system_period_cost/demand)
+    
+    # plots 25-day MA of total daily system costs
+    plt.figure()
+    plt.plot(moving_average(daily_system_costs, 25))
+    plt.title('25-Day MA of Total Daily System Cost')
+    plt.xlabel('Iteration (Day)')
+    plt.ylabel('Cost (£)')
+    
+    # plots 25-day MA of the average daily system cost per MWh
+    plt.figure()
+    plt.plot(moving_average(daily_avg_system_costs_MWh, 25))
+    plt.title('25-Day MA of Average Daily System Cost per MWh')
+    plt.xlabel('Iteration (Day)')
+    plt.ylabel('Cost (£/MWh)')
+    
+    # plots the average system cost per period over the last 100 days of the sim
+    plt.figure()
+    plt.plot(avg_system_period_cost)
+    plt.title('System Cost per Period Averaged over Final 100 Iterations')
+    plt.xlabel('Period')
+    plt.ylabel('Cost (£)')
+    
+    # the above, but normalised per MWh
+    plt.figure()
+    plt.plot(avg_system_period_cost_MWh)
+    plt.title('System Cost per MWh per Period Averaged over Final 100 Iterations')
+    plt.xlabel('Period')
+    plt.ylabel('Cost (£/MWh)')
+
+
+
+def final_five_day_dispatch(results):
+    """ Generates five plots of each of the last five days' raw dispatch schedules
+    
+    by fuel type, not ordering by offer price or differentiating by agent.
+    """
+    
+    generation = results['generation']
+    gen_labels = results['gen_labels']
+        
+    for day in range(1, 6):
+        
+        all_gen = pd.DataFrame({agent_id: np.zeros(48) for agent_id in gen_labels.iloc[-1].keys()})
+    
+        for period in range(48):
+                        
+            for agent_id in gen_labels.iloc[-1].keys():
+                
+                all_gen.iloc[period][agent_id] = generation.iloc[-day][period][agent_id][5]*2
+            
+        all_gen.columns = all_gen.columns.to_series().apply(lambda gen: gen_labels.iloc[-1][gen][0])
+        all_gen = all_gen.groupby(all_gen.columns, axis = 1).sum()
+        
+        plt.figure()
+        ax = all_gen[['nuclear', 'wind', 'coal', 'ccgt']].plot.bar(stacked = True)
+        ax.set(xlabel = 'Period',
+               xticks = list(range(0, 47, 2)),
+               xticklabels = list(range(0, 47, 2)),
+               ylabel = 'Generation (MW)', 
+               title = 'Dispatch Schedule of Day {0} by Fuel Type'.format(len(generation) - day))
 
 
 
@@ -1142,8 +1395,8 @@ def batchrun_simulation(model_class, fixed_params, days,
         gen_labels = results['Datacollector'].iloc[i].get_model_vars_dataframe()['gen_labels'][days - 1]
         
         figure = plt.figure(i)
-        for j in range(params['num_gen']):
-            plt.plot(range(days - 5), running_mean(profit[:, j], 5))
+        for j in range(params['num_agents']):
+            plt.plot(range(days - 5), moving_average(profit[:, j], 5))
             plt.title('Profit 5-Day MA with {0}: {1}'.format(results.columns[0], value))
             plt.legend([item for sublist in [['ccgt']*params['num_ccgt'], ['coal']*params['num_coal'], ['nuclear']*params['num_nuclear']] 
               for item in sublist])
@@ -1166,12 +1419,13 @@ def batchrun_simulation(model_class, fixed_params, days,
 
 
 def orderHeaders(params):
-    param_order = ['name','days','peak_margin','demand_sd','date','num_gen','num_wind','wind','wind_sd',
+    param_order = ['name','days','peak_margin','demand_sd','date','num_agents','num_wind','wind','wind_sd',
                    'num_ccgt','ccgt','num_coal','coal','num_nuclear','nuclear', 'use_supplier_agents', 
-                   'num_suppliers','dynamic_imbalance','px_action_method','bm_action_method',
-                   'constraints','px_temperature_inf','px_temperature_start',
+                   'num_suppliers','synthetic_demand','dynamic_imbalance','px_action_method','bm_action_method',
+                   'constraints','balancing_mechanism','px_temperature_inf','px_temperature_start',
                    'px_temperature_decay','bm_temperature_inf','bm_temperature_start','bm_temperature_decay',
-                   'px_expmt','bm_expmt','px_recency','bm_recency','epsilon','dampening_factor',
+                   'px_expmt','bm_expmt','px_recency','bm_recency','px_epsilon_inf','px_epsilon_start',
+                   'px_epsilon_decay','bm_epsilon_inf','bm_epsilon_start','bm_epsilon_decay','dampening_factor',
                    'px_reward_method','bm_reward_method','discount','kernel_radius','stage_list']
     ordered_headers = OrderedDict([(k, None) for k in param_order if k in params])
     ordered_headers.update(params)
