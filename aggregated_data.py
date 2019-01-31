@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import math as m
 from matplotlib import pyplot as plt
 import datetime
 
@@ -18,7 +19,7 @@ from pathlib import Path
 def genAggregator(start, end, graphs):
     
     days = int((datetime.datetime.strptime(end, '%Y-%m-%d') - datetime.datetime.strptime(start, '%Y-%m-%d'))/datetime.timedelta(days = 1))
-    
+
     data_folder = Path('Data')
     
     generation = pd.read_csv(data_folder / r'Total Generation By Type Half-Hourly 2013-2016.csv')
@@ -128,8 +129,8 @@ def genAggregator(start, end, graphs):
         fig_5 = plt.figure(5)
         ax5 = daily_prop_costs[['Nuclear', 'Wind', 'Hydro', 'Solar', 'Coal', 'CCGT']].plot.bar(stacked = True) 
         ax5.set(xlabel = 'Day',
-                xticks = list(range(0, days, days//5)),
-                xticklabels = list(range(0, days, days//5)),
+                xticks = list(range(0, days, m.ceil(days//5))),
+                xticklabels = list(range(0, days, m.ceil(days//5))),
                 ylabel = 'Proportion of Costs', 
                 title = 'Proportional Generation Costs per Day');
         fig_5 = ax5.get_figure()

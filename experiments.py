@@ -123,10 +123,35 @@ plt.title('Average Balancing Mechanism Marginal Price over Final 100 Days for {0
 # More attempts at different visualisations
 # =============================================================================
 
-# like the tracking of avea
+# construct real bm bid/offer ladders
 
+period = 31
+agent_id = 4
+day = 250
 
+bm_offers = results['bm_offers']
+bm_bids = results['bm_bids']
 
+bm_offers = list(zip(np.cumsum([bm_offers[day, agent_id][period][i][1] for i in range(5)]), 
+                    [bm_offers[day, agent_id][period][i][2] for i in range(5)]))
+
+bm_bids = list(zip(np.cumsum([bm_bids[day, agent_id][period][i][1] for i in range(5)]), 
+                    [bm_bids[day, agent_id][period][i][2] for i in range(5)]))
+
+bm_ladder = [bm_bids[-i] for i in range(1, 6)] + [bm_offers[i] for i in range(5)]
+
+plt.plot([bm_ladder[i][0] for i in range(10)],
+         [bm_ladder[i][1] for i in range(10)])
+plt.scatter([bm_ladder[i][0] for i in range(5, 10)],
+            [bm_ladder[i][1] for i in range(5, 10)], color = 'r')
+plt.scatter([bm_ladder[i][0] for i in range(0, 5)],
+            [bm_ladder[i][1] for i in range(0, 5)], color = 'b')
+
+plt.title('BM Bid/Offer Ladder for Agent {0}, Day {1}, Period {2}'.format(agent_id, day, period))
+plt.xlabel('Bid/Offer Volume (MWh)')
+plt.ylabel('Bid/Offer Price (£/MWh)')
+plt.axvline(x = 0, color = 'r')
+plt.grid()
 
 
     
@@ -158,9 +183,9 @@ weights = exp_profits_agent/np.linalg.norm(exp_profits_agent, ord = 1)
 plt.plot(weights)
 
 
-px_epsilon_inf = 0.01
-px_epsilon_start = 0.1
-px_epsilon_decay = 0.75 * (m.log((px_epsilon_start -px_epsilon_inf) /(0.1 * px_epsilon_inf)))
+px_epsilon_inf = 0.05
+px_epsilon_start = 0.25
+px_epsilon_decay = 1.2 * (m.log((px_epsilon_start -px_epsilon_inf) /(0.1 * px_epsilon_inf)))
 days = 500
 px_epsilon = []
 

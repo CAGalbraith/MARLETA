@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 Created on Mon Sep 10 15:20:15 2018
-
 @author: conno
 """
 
 import numpy as np
 from random import choices, random
 from copy import deepcopy
+import math as m
 
 import mesa_modified as mesa
+import marl
 
 
 class Generator(mesa.Agent):
     """ Properties should be assigned in model.py as simulation parameters, using
-
     the batch runner to iteratre when need, as well as the form of the markup set. 
     gen_id increments with each realisation of Generator and is assigned to each 
     instance as a unique identifier.
@@ -24,10 +24,8 @@ class Generator(mesa.Agent):
 
         super().__init__(fuel_id[1], model)
 
-        # internalise simulation length to calculate temperature decay rate
+        # internalise simulation length to calculate temperature/epsilon decay rate
         self.days = params['days']
-        
-        # keeps track of days for the increment offer method, may deprecate
         self.day = 0
         
         # stores phyiscal parameters of the agent
@@ -35,18 +33,20 @@ class Generator(mesa.Agent):
         self.id = fuel_id[1]
         self.capacity = params[fuel_id[0]]['cap']
         self.marginal_cost = params[fuel_id[0]]['marginal_cost']
-        self.startup_cost = params[fuel_id[0]]['startup_cost']
+        self.startup_cost = params[fuel_id[0]]['startup_cost/MW'] * self.capacity
         self.cycles = params[fuel_id[0]]['cycles']
-        self.min_gen = params[fuel_id[0]]['min_gen']
+        self.min_gen = params[fuel_id[0]]['min_gen_prop'] * self.capacity
         self.emissions = params[fuel_id[0]]['emissions']
         
         # initialises the true wind profile for the given simulation day
         if self.fuel == 'wind':
             self.wind_sd = params['wind_sd']
-            self.wind_profile = params['wind_profile']
+            self.true_wind = params['true_wind']
             self.dynamic_imbalance = params['dynamic_imbalance']
         
         # learning parameters
+        self.learning_mechanism = params['learning_mechanism']
+        
         self.px_action_method = params['px_action_method']
         self.bm_action_method = params['bm_action_method']
         
@@ -80,33 +80,95 @@ class Generator(mesa.Agent):
         
         # offer_set very important. Limit to marginal_cost or not?
             
-        self.price_offer_set = list(np.linspace(25, 125, 11))
+        self.px_price_offer_set = list(np.round(np.linspace(25, 125, 21), 0))
             
-        self.volume_offer_set = list(np.linspace(0.5, 1, 21))
+        self.px_volume_offer_set = list(np.round(np.linspace(0.5, 1, 21), 3))
         
         self.balancing_mechanism = params['balancing_mechanism']
         
         # list of bm intercept and gradient values
         
-        self.bm_intercept_set = list(np.linspace(5, 100, 21))
-        self.bm_gradient_set = list(np.linspace(0, 10, 21))
+        self.bm_intercept_set = list(np.round(np.linspace(5, 100, 21), 2))
+        self.bm_gradient_set = list(np.round(np.linspace(0, 10, 21), 1))
         
         self.bm_gradient_hold = params['bm_gradient_hold']
+        self.single_bm_ladder = params['single_bm_ladder']
         
-        # initialises propensities for PX price, PX quantities, and BM ladder,
-        # which is given a kernel centered on no change ([0 ,0])
         
-        self.px_price_propensities = np.ones((48, len(self.price_offer_set)))
-        self.px_volume_propensities = np.ones((48, len(self.volume_offer_set)))
-        self.bm_intercept_propensities = np.ones((48, len(self.bm_intercept_set)))
-        self.bm_gradient_propensities = np.ones((48, len(self.bm_gradient_set)))
+        # apply any heterogenous parameters specific to the agent
+        
+        if self.id in params['heterogeneous_parameters']:
+            
+            for param_name, param_value in params['heterogeneous_parameters'][self.id].items():
+                
+                setattr(self, param_name, param_value)
+                print(self.learning_mechanism)
+                
+        
+        # initialises propensities for PX price, PX quantities, and BM ladder
+        # can also accept user-specified propensities, or from a previous run
+        
+        if self.learning_mechanism == 'VERA':
+            
+            self.px_price_RL = marl.VERA(self.px_recency, self.px_expmt, len(self.px_price_offer_set))
+            self.px_volume_RL = marl.VERA(self.bm_recency, self.bm_expmt, len(self.px_volume_offer_set))
+            self.bm_intercept_RL = marl.VERA(self.bm_recency, self.bm_expmt, len(self.bm_intercept_set))
+            self.bm_gradient_RL = marl.VERA(self.bm_recency, self.bm_expmt, len(self.bm_gradient_set))
+            
+            self.state_space = range(48)
+            
+        elif self.learning_mechanism == 'QLearning':
+            
+            self.px_price_RL = marl.QLearning(len(self.px_price_offer_set))
+            self.px_volume_RL = marl.QLearning(len(self.px_volume_offer_set))
+            self.bm_intercept_RL = marl.QLearning(len(self.bm_intercept_set))
+            self.bm_gradient_RL = marl.QLearning(len(self.bm_gradient_set))
+            
+            self.state_space = range(48)
+            
+        elif self.learning_mechanism == 'Stateful_QLearning':
+            
+            self.px_price_RL = marl.Stateful_QLearning(len(self.px_price_offer_set))
+            self.px_volume_RL = marl.Stateful_QLearning(len(self.px_volume_offer_set))
+            self.bm_intercept_RL = marl.Stateful_QLearning(len(self.bm_intercept_set))
+            self.bm_gradient_RL = marl.Stateful_QLearning(len(self.bm_gradient_set))
+            
+            # this will need tweaking, but wil essentially become the proportion
+            # of max available capacity that the demand is closest to
+            
+            self.max_capacity = params['max_capacity']
+            self.state_space = list(np.linspace(0, 1, 21))
+        
+        if len(params['propensities'][self.id]) == 0:
+            
+            self.px_price_propensities = self.px_price_RL.initialisePropensities(self.px_price_offer_set,
+                                                                                 self.state_space)
+            
+            self.px_volume_propensities = self.px_volume_RL.initialisePropensities(self.px_volume_offer_set,
+                                                                                   self.state_space)
+        
+            self.bm_intercept_propensities = self.bm_intercept_RL.initialisePropensities(self.bm_intercept_set,
+                                                                                         self.state_space,
+                                                                                         single_bm_ladder = self.single_bm_ladder)
+            
+            self.bm_gradient_propensities = self.bm_gradient_RL.initialisePropensities(self.bm_gradient_set,
+                                                                                       self.state_space,
+                                                                                       single_bm_ladder = self.single_bm_ladder)
+            
+        else:
+        
+            self.px_price_propensities = params['propensities'][self.id]['px_price']
+            self.px_volume_propensities = params['propensities'][self.id]['px_volume']
+            self.bm_intercept_propensities = params['propensities'][self.id]['bm_intercept']
+            self.bm_gradient_propensities = params['propensities'][self.id]['bm_gradient']
+            
         
         # if the balancing mechanism is not in play, then volume offers are set
         # at full capacity
         
         if self.balancing_mechanism == False:
             
-            self.px_volume_propensities = np.zeros((48, len(self.volume_offer_set)))
+            self.px_volume_propensities = np.zeros((len(self.state_space), len(self.px_volume_offer_set)))
             self.px_volume_propensities[-1] = 1
             
             self.bm_period_profit = []
@@ -119,7 +181,8 @@ class Generator(mesa.Agent):
         # reward signal scaled to the max profit the generator can make in a 
         # period, to make the reward independent of physical parameters
         
-        self.dampener = self.capacity * (self.price_offer_set[-1] - self.marginal_cost)/self.dampening_factor
+#        self.dampener = self.capacity * (self.px_price_offer_set[-1] - self.marginal_cost) * self.dampening_factor
+        self.dampener = 1
         
         # keeps track of the offers the agent makes, their success rate, and
         # the average profit made from each to inform future actions. Each offer
@@ -127,22 +190,30 @@ class Generator(mesa.Agent):
         # success ratio, average profit, expected_profit, change since previous
         # day, average reward, expected reward]
         
-        self.expected_profits = {offer: {period: [0, 0, 0, 0, 0, 0, 0, 0] for period in range(48)} for offer in self.price_offer_set}
+        self.expected_profits = {offer: {period: [0, 0, 0, 0, 0, 0, 0, 0] for period in range(48)} for offer in self.px_price_offer_set}
         
-        # if imbalance is static, initialises the error profile for wind
         
-        if (params['dynamic_imbalance'] == False) and (self.fuel == 'wind'):
+        # if imbalance is static, initialises the error profile for wind. If a
+        # synthetic imbalance is specified, sets forecast_wind = true_wind
+        
+        if (len(params['synthetic_imbalance']) != 0) and (self.fuel == 'wind'):
+
+            self.forecast_wind = self.true_wind/2
+            
+        elif (params['dynamic_imbalance'] == False) and (self.fuel == 'wind'):
             
             self.forecast_wind = np.zeros(48)
             
-            self.forecast_wind[0] = (self.wind_profile[0]/2) * (1 + np.random.normal(scale = self.wind_sd))
-            self.forecast_wind[1] = self.forecast_wind[0] + 0.25*(self.wind_profile[1]/2 - self.forecast_wind[0])
+            self.forecast_wind[0] = (self.true_wind[0]/2) * (1 + np.random.normal(scale = self.wind_sd))
+            self.forecast_wind[1] = self.forecast_wind[0] + 0.25*(self.true_wind[1]/2 - self.forecast_wind[0])
             
             for i in range(2, 48):
                 
                 self.forecast_wind[i] = self.forecast_wind[i-1]*(1 + np.random.normal(scale = self.wind_sd)) + \
-                                   + 0.25*(self.wind_profile[i]/2 - self.forecast_wind[i-1])
-
+                                   + 0.25*(self.true_wind[i]/2 - self.forecast_wind[i-1])
+                                   
+            
+            
         
         
     def softmax(self, x, temperature):
@@ -168,6 +239,50 @@ class Generator(mesa.Agent):
         
         return self.softmax(kernel, 0.2)
     
+ 
+    
+    def stateProxy(self, period, requested_props):
+        """ A proxy function to ease the transition to state-aware learning.
+        
+        Accepts the period in question, and returns an index marking the tranche
+        of the Q-values corresponding to the demand during that period. If a
+        non-state-aware method is being used, just returns the requested props.
+        """
+        
+        if (self.learning_mechanism == 'Stateful_QLearning'):
+            
+            if (self.single_bm_ladder == True) and (requested_props[0:2] == 'bm'):
+            
+                return getattr(self, requested_props)
+            
+            else:
+        
+                demand = self.demand[period]
+                
+                demand_tranche = np.argmin(np.abs(np.subtract(self.state_space, demand/self.max_capacity)))
+                
+                return getattr(self, requested_props)[demand_tranche]
+        
+        elif (self.single_bm_ladder == True) and (requested_props[0:2] == 'bm'):
+        
+            return getattr(self, requested_props)
+
+        else:
+                
+            return getattr(self, requested_props)[period]
+        
+    
+    
+    def demandTranche(self, period):
+        """ Accepted period, returns demand tranche. Stripped down version of
+        
+        stateProxy, without the propensity array return.
+        """
+        
+        demand = self.demand[period]
+            
+        return np.argmin(np.abs(np.subtract(self.state_space, demand/self.max_capacity)))
+    
     
     
     def make_px_offer(self):
@@ -186,13 +301,13 @@ class Generator(mesa.Agent):
                 
                 self.forecast_wind = np.zeros(48)
                 
-                self.forecast_wind[0] = (self.wind_profile[0]/2) * (1 + np.random.normal(scale = self.wind_sd))
-                self.forecast_wind[1] = self.forecast_wind[0] + 0.25*(self.wind_profile[1]/2 - self.forecast_wind[0])
+                self.forecast_wind[0] = (self.true_wind[0]/2) * (1 + np.random.normal(scale = self.wind_sd))
+                self.forecast_wind[1] = self.forecast_wind[0] + 0.25*(self.true_wind[1]/2 - self.forecast_wind[0])
                 
                 for i in range(2, 48):
                     
                     self.forecast_wind[i] = self.forecast_wind[i-1]*(1 + np.random.normal(scale = self.wind_sd)) + \
-                                       + 0.25*(self.wind_profile[i]/2 - self.forecast_wind[i-1])
+                                       + 0.25*(self.true_wind[i]/2 - self.forecast_wind[i-1])
                                        
                      
             self.px_offer = [[self.forecast_wind[period], 0, self.forecast_wind[period], 0] for period in range(48)]
@@ -210,20 +325,20 @@ class Generator(mesa.Agent):
         
             for period in range(48):
                 
-                px_price_weights = self.softmax(self.px_price_propensities[period, :], self.px_temperature)
-                px_volume_weights = self.softmax(self.px_volume_propensities[period, :], self.px_temperature)
+                px_price_weights = self.softmax(self.stateProxy(period, 'px_price_propensities'), self.px_temperature)
+                px_volume_weights = self.softmax(self.stateProxy(period, 'px_volume_propensities'), self.px_temperature)
                     
                 if self.fuel == 'nuclear':
                     
                     self.px_offer.append([self.capacity/2, 
-                                       choices(self.price_offer_set, px_price_weights)[0],
+                                       choices(self.px_price_offer_set, px_price_weights)[0],
                                        self.capacity/2,
                                        self.capacity/2])
 
                 else:
                     
-                    self.px_offer.append([(choices(self.volume_offer_set, px_volume_weights)[0]) * self.capacity/2,
-                                        choices(self.price_offer_set, px_price_weights)[0],
+                    self.px_offer.append([(choices(self.px_volume_offer_set, px_volume_weights)[0]) * self.capacity/2,
+                                        choices(self.px_price_offer_set, px_price_weights)[0],
                                         self.capacity/2,
                                         self.min_gen/2])
         
@@ -248,12 +363,12 @@ class Generator(mesa.Agent):
                     max_price_props = []
                     max_volume_props = []
                     
-                    for i, prop in enumerate(self.px_price_propensities[period]):
-                        if prop == np.max(self.px_price_propensities[period]):
+                    for i, prop in enumerate(self.stateProxy(period, 'px_price_propensities')):
+                        if prop == np.max(self.stateProxy(period, 'px_price_propensities')):
                             max_price_props.append(i)
                             
-                    for i, prop in enumerate(self.px_volume_propensities[period]):
-                        if prop == np.max(self.px_volume_propensities[period]):
+                    for i, prop in enumerate(self.stateProxy(period, 'px_volume_propensities')):
+                        if prop == np.max(self.stateProxy(period, 'px_volume_propensities')):
                             max_volume_props.append(i)
                     
                     max_price_prop = choices(max_price_props)[0]
@@ -264,7 +379,7 @@ class Generator(mesa.Agent):
                     
                     for i, action in enumerate(price_actions):
                         
-                        if (action < 0) or (len(self.price_offer_set) <= action):
+                        if (action < 0) or (len(self.px_price_offer_set) <= action):
                             
                             price_kernel[i] = 0
                     
@@ -277,23 +392,23 @@ class Generator(mesa.Agent):
                     if self.fuel == 'nuclear':
                         
                         self.px_offer.append([self.capacity/2, 
-                                           self.price_offer_set[int(choices(price_actions, price_kernel)[0])],
-                                           self.capacity/2,
-                                           self.capacity/2])
+                                              self.px_price_offer_set[int(choices(price_actions, price_kernel)[0])],
+                                              self.capacity/2,
+                                              self.capacity/2])
                         
                     else:
                         
-                        self.px_offer.append([(self.volume_offer_set[int(choices(volume_actions, volume_kernel)[0])]) * self.capacity/2,
-                                           self.price_offer_set[int(choices(price_actions, price_kernel)[0])],
-                                           self.capacity/2,
-                                           self.min_gen/2])
+                        self.px_offer.append([(self.px_volume_offer_set[int(choices(volume_actions, volume_kernel)[0])]) * self.capacity/2,
+                                               self.px_price_offer_set[int(choices(price_actions, price_kernel)[0])],
+                                               self.capacity/2,
+                                               self.min_gen/2])
 
                 else:   
                     
                     self.px_offer.append([0.85 * self.capacity/2, 
-                                       choices(self.price_offer_set)[0],
-                                       self.capacity/2,
-                                       self.min_gen/2])
+                                          choices(self.px_price_offer_set)[0],
+                                          self.capacity/2,
+                                          self.min_gen/2])
             
         
         # modified s.t if max propensities are the same, it chooses randomly from those
@@ -310,12 +425,12 @@ class Generator(mesa.Agent):
                     max_price_props = []
                     max_volume_props = []
                     
-                    for i, prop in enumerate(self.px_price_propensities[period]):
-                        if prop == np.max(self.px_price_propensities[period]):
+                    for i, prop in enumerate(self.stateProxy(period, 'px_price_propensities')):
+                        if prop == np.max(self.stateProxy(period, 'px_price_propensities')):
                             max_price_props.append(i)
                             
-                    for i, prop in enumerate(self.px_volume_propensities[period]):
-                        if prop == np.max(self.px_volume_propensities[period]):
+                    for i, prop in enumerate(self.stateProxy(period, 'px_volume_propensities')):
+                        if prop == np.max(self.stateProxy(period, 'px_volume_propensities')):
                             max_volume_props.append(i)
                             
                     max_price_prop = choices(max_price_props)[0]
@@ -324,14 +439,14 @@ class Generator(mesa.Agent):
                     if self.fuel == 'nuclear':
                         
                         self.px_offer.append([self.capacity/2, 
-                                              self.price_offer_set[int(max_price_prop)],
+                                              self.px_price_offer_set[int(max_price_prop)],
                                               self.capacity/2,
                                               self.capacity/2])
                         
                     else:
                         
-                        self.px_offer.append([(self.volume_offer_set[int(max_volume_prop)]) * self.capacity/2,
-                                               self.price_offer_set[int(max_price_prop)],
+                        self.px_offer.append([(self.px_volume_offer_set[int(max_volume_prop)]) * self.capacity/2,
+                                               self.px_price_offer_set[int(max_price_prop)],
                                                self.capacity/2,
                                                self.min_gen/2])
                     
@@ -341,19 +456,113 @@ class Generator(mesa.Agent):
                     if self.fuel == 'nuclear':
                         
                         self.px_offer.append([self.capacity/2, 
-                                              choices(self.price_offer_set)[0],
+                                              choices(self.px_price_offer_set)[0],
                                               self.capacity/2,
                                               self.capacity/2])
                         
                     else:
                         
-                        self.px_offer.append([choices(self.volume_offer_set)[0] * self.capacity/2,
-                                              choices(self.price_offer_set)[0],
+                        self.px_offer.append([choices(self.px_volume_offer_set)[0] * self.capacity/2,
+                                              choices(self.px_price_offer_set)[0],
                                               self.capacity/2,
                                               self.min_gen/2])
     
-
-
+        elif self.px_action_method == 'SA-Q':
+            
+            self.px_temperature = self.px_temperature_inf + (self.px_temperature_start - self.px_temperature_inf) \
+                                  * np.exp(-self.day/(self.days/self.px_temperature_decay)) 
+            
+            for period in range(48):
+                
+                random_price_prop = choices(range(len(self.stateProxy(period, 'px_price_propensities'))))[0]
+                random_volume_prop = choices(range(len(self.stateProxy(period, 'px_volume_propensities'))))[0]
+                
+                max_price_props = []
+                max_volume_props = []
+                
+                for i, prop in enumerate(self.stateProxy(period, 'px_price_propensities')):
+                    if prop == np.max(self.stateProxy(period, 'px_price_propensities')):
+                        max_price_props.append(i)
+                        
+                for i, prop in enumerate(self.stateProxy(period, 'px_volume_propensities')):
+                    if prop == np.max(self.stateProxy(period, 'px_volume_propensities')):
+                        max_volume_props.append(i)
+                        
+                greedy_price_prop = choices(max_price_props)[0]
+                greedy_volume_prop = choices(max_volume_props)[0]
+                
+                xi_price = m.exp((self.stateProxy(period, 'px_price_propensities')[random_price_prop] - \
+                                  self.stateProxy(period, 'px_price_propensities')[greedy_price_prop])/self.px_temperature)
+                xi_volume = m.exp((self.stateProxy(period, 'px_volume_propensities')[random_volume_prop] - \
+                                   self.stateProxy(period, 'px_volume_propensities')[greedy_volume_prop])/self.px_temperature)
+                
+                xi_price_compare = random()
+                xi_volume_compare = random()
+                
+                if (xi_price_compare >= xi_price) and (xi_volume_compare >= xi_volume):
+                    
+                    if self.fuel == 'nuclear':
+                            
+                        self.px_offer.append([self.capacity/2, 
+                                              self.px_price_offer_set[int(greedy_price_prop)],
+                                              self.capacity/2,
+                                              self.capacity/2])
+                        
+                    else:
+                        
+                        self.px_offer.append([(self.px_volume_offer_set[int(greedy_volume_prop)]) * self.capacity/2,
+                                               self.px_price_offer_set[int(greedy_price_prop)],
+                                               self.capacity/2,
+                                               self.min_gen/2])
+                
+                elif (xi_price_compare >= xi_price) and (xi_volume_compare < xi_volume):
+                    
+                    if self.fuel == 'nuclear':
+                            
+                        self.px_offer.append([self.capacity/2, 
+                                              self.px_price_offer_set[int(greedy_price_prop)],
+                                              self.capacity/2,
+                                              self.capacity/2])
+                        
+                    else:
+                        
+                        self.px_offer.append([(self.px_volume_offer_set[int(random_volume_prop)]) * self.capacity/2,
+                                               self.px_price_offer_set[int(greedy_price_prop)],
+                                               self.capacity/2,
+                                               self.min_gen/2])
+        
+                elif (xi_price_compare < xi_price) and (xi_volume_compare >= xi_volume):
+                    
+                    if self.fuel == 'nuclear':
+                            
+                        self.px_offer.append([self.capacity/2, 
+                                              self.px_price_offer_set[int(random_price_prop)],
+                                              self.capacity/2,
+                                              self.capacity/2])
+                        
+                    else:
+                        
+                        self.px_offer.append([(self.px_volume_offer_set[int(greedy_volume_prop)]) * self.capacity/2,
+                                               self.px_price_offer_set[int(random_price_prop)],
+                                               self.capacity/2,
+                                               self.min_gen/2])
+        
+                else:
+    
+                    if self.fuel == 'nuclear':
+                            
+                        self.px_offer.append([self.capacity/2, 
+                                              self.px_price_offer_set[int(random_price_prop)],
+                                              self.capacity/2,
+                                              self.capacity/2])
+                        
+                    else:
+                        
+                        self.px_offer.append([(self.px_volume_offer_set[int(random_volume_prop)]) * self.capacity/2,
+                                               self.px_price_offer_set[int(random_price_prop)],
+                                               self.capacity/2,
+                                               self.min_gen/2])
+                
     def construct_bm_ladder(self):
         """ Observes the agent's remaining capacities from the PX, and uses
         
@@ -373,52 +582,108 @@ class Generator(mesa.Agent):
           
         self.bm_epsilon = self.bm_epsilon_inf + (self.bm_epsilon_start - self.bm_epsilon_inf) \
                           * np.exp(-self.day/(self.days/self.bm_epsilon_decay)) 
-
-        for period in range(48):
+        
+        
+        if self.single_bm_ladder == True:
             
             if self.bm_action_method == 'softmax':
-            
-                bm_intercept_weights = self.softmax(self.bm_intercept_propensities[period], self.bm_temperature)
-                bm_gradient_weights = self.softmax(self.bm_gradient_propensities[period], self.bm_temperature)
-
-                #self.bm_increment_choice[period] = choices(self.bm_increment_set, bm_ladder_weights)[0]
-                self.bm_intercept_choices[period] = choices(self.bm_intercept_set, bm_intercept_weights)[0]
-                self.bm_gradient_choices[period] = choices(self.bm_gradient_set, bm_gradient_weights)[0]
+                
+                bm_intercept_weights = self.softmax(self.stateProxy(0, 'bm_intercept_propensities'), self.bm_temperature)
+                bm_gradient_weights = self.softmax(self.stateProxy(0, 'bm_gradient_propensities'), self.bm_temperature)
+                
+                bm_intercept_choice = choices(self.bm_intercept_set, bm_intercept_weights)[0]
+                bm_gradient_choice = choices(self.bm_gradient_set, bm_gradient_weights)[0]
             
             elif self.bm_action_method == 'epsilon_greedy':
                 
                 if random() > self.bm_epsilon:
+                        
+                        max_intercept_props = []
+                        
+                        for i, prop in enumerate(self.stateProxy(0, 'bm_intercept_propensities')):
+                            if prop == np.max(self.stateProxy(0, 'bm_intercept_propensities')):
+                                max_intercept_props.append(i)
+                        
+                        bm_intercept_choice = self.bm_intercept_set[choices(max_intercept_props)[0]]
                     
-                    max_intercept_props = []
-                    
-                    for i, prop in enumerate(self.bm_intercept_propensities[period]):
-                        if prop == np.max(self.bm_intercept_propensities[period]):
-                            max_intercept_props.append(i)
-                    
-                    self.bm_intercept_choices[period] = self.bm_intercept_set[choices(max_intercept_props)[0]]
-                
                 else:
+                        
+                    bm_intercept_choice = choices(self.bm_intercept_set)[0]
                     
-                    self.bm_intercept_choices[period] = choices(self.bm_intercept_set)[0]
-                
                 if random() > self.bm_epsilon:
                     
                     max_gradient_props = []
                     
-                    for i, prop in enumerate(self.bm_gradient_propensities[period]):
-                        if prop == np.max(self.bm_gradient_propensities[period]):
+                    for i, prop in enumerate(self.stateProxy(0, 'bm_gradient_propensities')):
+                        if prop == np.max(self.stateProxy(0, 'bm_gradient_propensities')):
                             max_gradient_props.append(i)
                     
-                    self.bm_gradient_choices[period] = self.bm_gradient_set[choices(max_gradient_props)[0]]
+                    bm_gradient_choice = self.bm_gradient_set[choices(max_gradient_props)[0]]
                 
                 else:
                     
-                    self.bm_gradient_choices[period] = choices(self.bm_gradient_set)[0]
+                    bm_gradient_choice = choices(self.bm_gradient_set)[0]
+         
+            for period in range(48):
+                       
+                if self.bm_gradient_hold != 0:
+                    
+                    self.bm_gradient_choices[period] = self.bm_gradient_hold
+                    self.bm_intercept_choices[period] = bm_intercept_choice
+                
+                else:
+                    
+                    self.bm_gradient_choices[period] = bm_gradient_choice
+                    self.bm_intercept_choices[period] = bm_intercept_choice
+        
+        else: 
             
-            if self.bm_gradient_hold != 0:
+            for period in range(48):
                 
-                self.bm_gradient_choices[period] = self.bm_gradient_hold
+                if self.bm_action_method == 'softmax':
                 
+                    bm_intercept_weights = self.softmax(self.stateProxy(period, 'bm_intercept_propensities'), self.bm_temperature)
+                    bm_gradient_weights = self.softmax(self.stateProxy(period, 'bm_gradient_propensities'), self.bm_temperature)
+    
+                    self.bm_intercept_choices[period] = choices(self.bm_intercept_set, bm_intercept_weights)[0]
+                    self.bm_gradient_choices[period] = choices(self.bm_gradient_set, bm_gradient_weights)[0]
+                
+                elif self.bm_action_method == 'epsilon_greedy':
+                    
+                    if random() > self.bm_epsilon:
+                        
+                        max_intercept_props = []
+                        
+                        for i, prop in enumerate(self.stateProxy(period, 'bm_intercept_propensities')):
+                            if prop == np.max(self.stateProxy(period, 'bm_intercept_propensities')):
+                                max_intercept_props.append(i)
+                        
+                        self.bm_intercept_choices[period] = self.bm_intercept_set[choices(max_intercept_props)[0]]
+                    
+                    else:
+                        
+                        self.bm_intercept_choices[period] = choices(self.bm_intercept_set)[0]
+                    
+                    if random() > self.bm_epsilon:
+                        
+                        max_gradient_props = []
+                        
+                        for i, prop in enumerate(self.stateProxy(period, 'bm_gradient_propensities')):
+                            if prop == np.max(self.stateProxy(period, 'bm_gradient_propensities')):
+                                max_gradient_props.append(i)
+                        
+                        self.bm_gradient_choices[period] = self.bm_gradient_set[choices(max_gradient_props)[0]]
+                    
+                    else:
+                        
+                        self.bm_gradient_choices[period] = choices(self.bm_gradient_set)[0]
+                
+                if self.bm_gradient_hold != 0:
+                    
+                    self.bm_gradient_choices[period] = self.bm_gradient_hold
+                
+        
+        for period in range(48):
             
             bm_offer_volume = self.bm_available_volume[period][0]
             bm_bid_volume = self.bm_available_volume[period][1]
@@ -434,14 +699,13 @@ class Generator(mesa.Agent):
                               [self.id, round(0.15*bm_offer_volume, 2), round(self.bm_intercept_choices[period] + 3*self.bm_gradient_choices[period], 2)],
                               [self.id, round(0.25*bm_offer_volume, 2), round(self.bm_intercept_choices[period] + 4*self.bm_gradient_choices[period], 2)],
                               [self.id, round(0.5*bm_offer_volume, 2), round(self.bm_intercept_choices[period] + 5*self.bm_gradient_choices[period], 2)]])
-        
+    
             
         return bm_bids, bm_offers
                         
         
     def update_px_propensities(self, generation, px_marginal_price):
         """ Takes the dispatched generation for each period of the previous
-
         day, returns an array of profit made in each period, and updates
         propensities using the modified Roth-Erev algorithm. Returns total
         and period profits for each day.
@@ -561,87 +825,46 @@ class Generator(mesa.Agent):
             self.expected_profits[self.px_price_offer[period]][period][6] = (self.expected_profits[self.px_price_offer[period]][period][0] * self.expected_profits[self.px_price_offer[period]][period][6] \
                                                                + self.px_reward[period])/(self.expected_profits[self.px_price_offer[period]][period][0] + 1)
             self.expected_profits[self.px_price_offer[period]][period][7] = self.expected_profits[self.px_price_offer[period]][period][6] * self.expected_profits[self.px_price_offer[period]][period][2]
+                
         
-        # updates propensities according to Roth-Erev
+        # updates propensities according to selected learning algorithm
         
         self.px_price_propensities = deepcopy(self.px_price_propensities)
         
         if self.px_reward_method == 'period_profit':
         
-            for period, reward in enumerate(self.px_reward):
-                
-                for j, prop in enumerate(self.px_price_propensities[period]):
-                    
-                    if j == self.price_offer_set.index(self.px_price_offer[period]):
-                        
-                        self.px_price_propensities[period][j] = (1 - self.px_recency) * prop + ( 1 - self.px_expmt) * reward/(self.dampener)
-                        
-                    else:
-                        
-                        self.px_price_propensities[period][j] = (1 - self.px_recency) * prop + ((self.px_expmt * prop) / (len(self.price_offer_set) - 1))
+            self.px_reward /= self.dampener
         
         elif self.px_reward_method == 'day_profit':
             
-            for period in range(48):
-                
-                for j, prop in enumerate(self.px_price_propensities[period]):
-                    
-                    if j == self.price_offer_set.index(self.px_price_offer[period]):
-                        
-                        self.px_price_propensities[period][j] = (1 - self.px_recency) * prop + ( 1 - self.px_expmt) * sum(reward)/(self.dampener * 48)
-                        
-                    else:
-                        
-                        self.px_price_propensities[period][j] = (1 - self.px_recency) * prop + ((self.px_expmt * prop) / (len(self.price_offer_set) - 1))
-                        
-        elif self.px_reward_method == 'discounted_profit':
-            
-            for period in range(48):
-                
-                discounted_reward = sum(reward * self.discount ** n for n, reward in enumerate(self.px_reward[period:]))
-                
-                for j, prop in enumerate(self.px_price_propensities[period]):
-                    
-                    if j == self.price_offer_set.index(self.px_price_offer[period]):
-                        
-                        self.px_price_propensities[period][j] = (1 - self.px_recency) * prop + ( 1 - self.px_expmt) * discounted_reward/(self.dampener * (48 - period))
-                        
-                    else:
-                        
-                        self.px_price_propensities[period][j] = (1 - self.px_recency) * prop + ((self.px_expmt * prop) / (len(self.price_offer_set) - 1))
-        
+            self.px_reward = sum(self.px_reward)/(self.dampener * 48)       
+                         
         elif self.px_reward_method == 'kernel_profit':
             
             kernel = self.create_kernel(self.kernel_radius, self.discount)
-            kernel_reward = np.convolve(self.px_reward, kernel, mode = 'same')
-            
-            for period in range(48):
-                
-                for j, prop in enumerate(self.px_price_propensities[period]):
-                    
-                    if j == self.price_offer_set.index(self.px_price_offer[period]):
-                                                    
-                        self.px_price_propensities[period][j] = (1 - self.px_recency) * prop + ( 1 - self.px_expmt) * kernel_reward[period]/(self.dampener * sum(kernel))
-                        
-                    else:
-                        
-                        self.px_price_propensities[period][j] = (1 - self.px_recency) * prop + ((self.px_expmt * prop) / (len(self.price_offer_set) - 1))
-                        
-        
+            self.px_reward = np.convolve(self.px_reward, kernel, mode = 'same')/self.dampener
+                   
         elif self.px_reward_method == 'expected_profit':
             
-            for period, delta_exp_reward in enumerate([self.expected_profits[self.px_price_offer[period]][period][5] for period in range(48)]):
+            self.px_reward = np.divide([self.expected_profits[self.px_price_offer[period]][period][5] for period in range(48)],
+                                        self.dampener)          
+            
+                  
+        for period in range(48):
+            
+            if self.learning_mechanism == 'Stateful_QLearning':
+        
+                state_proxy = self.demandTranche(period)
                 
-                for j, prop in enumerate(self.px_price_propensities[period]):
-                    
-                    if j == self.price_offer_set.index(self.px_price_offer[period]):
-                        
-                        self.px_price_propensities[period][j] = (1 - self.px_recency) * prop + ( 1 - self.px_expmt) * delta_exp_reward/(self.dampener)
-                        
-                    else:
-                        
-                        self.px_price_propensities[period][j] = (1 - self.px_recency) * prop + ((self.px_expmt * prop) / (len(self.price_offer_set) - 1))
-
+            else:
+                
+                state_proxy = period
+            
+            chosen_price = self.px_price_offer_set.index(self.px_price_offer[period])
+            
+            self.px_price_propensities[state_proxy] = self.px_price_RL.update(props = self.px_price_propensities[state_proxy],
+                                                                              reward = self.px_reward[period],
+                                                                              chosen_action = chosen_price)
         
         
         
@@ -673,100 +896,79 @@ class Generator(mesa.Agent):
             
         # remember that the price_offer here is not constrained to 1 if nuclear,
         # hence why profit is calculated using the figures from self.generation
+        # also, rewards for volume are given to the post-constrained volume
+        # dispatch, rather than the actual volume offer that was made.
         
-        self.volume_offer = [x[0] for x in self.px_offer]
+        self.true_volume_offer = [x[0] for x in self.px_offer]
+        self.constrained_volume_offer = [x[0] for x in self.generation]
         
         self.accepted_bm_actions = [x[3] for x in self.generation]
         
         self.bm_period_profit = [sum([x[1] * x[2] for x in actions]) - (self.marginal_cost * self.generation[period][2]) for period, actions in enumerate(self.accepted_bm_actions)]
-
-        self.bm_reward = self.bm_period_profit
         
-        self.bm_day_profit = sum(self.bm_period_profit)
-        
+        self.bm_day_profit = sum(self.bm_period_profit)        
         
         self.px_volume_propensities = deepcopy(self.px_volume_propensities)
         self.bm_intercept_propensities = deepcopy(self.bm_intercept_propensities)
         self.bm_gradient_propensities = deepcopy(self.bm_gradient_propensities)
         
+        
+        # shape the reward function based on bm profits per period
+        
         if self.bm_reward_method == 'kernel_profit':
             
             kernel = self.create_kernel(self.kernel_radius, self.discount)
-            kernel_reward = np.convolve(self.bm_reward, kernel, mode = 'same')
+            self.bm_reward = np.divide(np.convolve(self.bm_period_profit, kernel, mode = 'same'), self.dampener)
             
-            for period in range(48):
-                
-                for i, prop in enumerate(self.px_volume_propensities[period]):
-                    
-                    if i == self.volume_offer_set.index((self.volume_offer[period] /(self.capacity/2))):
-                                                    
-                        self.px_volume_propensities[period][i] = (1 - self.bm_recency) * prop + ( 1 - self.bm_expmt) * kernel_reward[period]/(self.dampener/3)
-                        
-                    else:
-                        
-                        self.px_volume_propensities[period][i] = (1 - self.bm_recency) * prop + ((self.bm_expmt * prop) / (len(self.volume_offer_set) - 1))
-                
-                
-                for j, prop in enumerate(self.bm_intercept_propensities[period]):
-                    
-                    if j == self.bm_intercept_set.index(self.bm_intercept_choices[period]):
-                                                    
-                        self.bm_intercept_propensities[period][j] = (1 - self.bm_recency) * prop + ( 1 - self.bm_expmt) * kernel_reward[period]/(self.dampener/3)
-                        
-                    else:
-                        
-                        self.bm_intercept_propensities[period][j] = (1 - self.bm_recency) * prop + ((self.bm_expmt * prop) / (len(self.bm_intercept_set) - 1))
-                
-                if self.bm_gradient_hold == 0:
-                    
-                    for k, prop in enumerate(self.bm_gradient_propensities[period]):
-                        
-                        if k == self.bm_gradient_set.index(self.bm_gradient_choices[period]):
-                                                        
-                            self.bm_gradient_propensities[period][k] = (1 - self.bm_recency) * prop + ( 1 - self.bm_expmt) * kernel_reward[period]/(self.dampener/3)
-                            
-                        else:
-                            
-                            self.bm_gradient_propensities[period][k] = (1 - self.bm_recency) * prop + ((self.bm_expmt * prop) / (len(self.bm_gradient_set) - 1))
-
         
         elif self.bm_reward_method == 'period_profit':
             
-            for period in range(48):
-                
-                for i, prop in enumerate(self.px_volume_propensities[period]):
-                    
-                    if i == self.volume_offer_set.index((self.volume_offer[period] /(self.capacity/2))):
-                                                    
-                        self.px_volume_propensities[period][i] = (1 - self.bm_recency) * prop + ( 1 - self.bm_expmt) * self.bm_reward[period]/(self.dampener/3)
-                        
-                    else:
-                        
-                        self.px_volume_propensities[period][i] = (1 - self.bm_recency) * prop + ((self.bm_expmt * prop) / (len(self.volume_offer_set) - 1))
-
-                for j, prop in enumerate(self.bm_intercept_propensities[period]):
-                    
-                    if j == self.bm_intercept_set.index(self.bm_intercept_choices[period]):
-                                                    
-                        self.bm_intercept_propensities[period][j] = (1 - self.bm_recency) * prop + ( 1 - self.bm_expmt) * self.bm_reward[period]/(self.dampener/3)
-                        
-                    else:
-                        
-                        self.bm_intercept_propensities[period][j] = (1 - self.bm_recency) * prop + ((self.bm_expmt * prop) / (len(self.bm_intercept_set) - 1))
-                
-                if self.bm_gradient_hold == 0:
-                    
-                    for k, prop in enumerate(self.bm_gradient_propensities[period]):
-                        
-                        if k == self.bm_gradient_set.index(self.bm_gradient_choices[period]):
-                                                        
-                            self.bm_gradient_propensities[period][k] = (1 - self.bm_recency) * prop + ( 1 - self.bm_expmt) * self.bm_reward[period]/(self.dampener/3)
-                            
-                        else:
-                            
-                            self.bm_gradient_propensities[period][k] = (1 - self.bm_recency) * prop + ((self.bm_expmt * prop) / (len(self.bm_gradient_set) - 1))
-                           
+            self.bm_reward = np.divide(self.bm_period_profit, self.dampener)
         
+        # if a single bm-ladder is being used, then the day profit is used by default
+        self.bm_day_reward = self.bm_day_profit/(self.dampener * 48)
+                
+        # update propensities according to selected learning algorithm
+        
+        for period in range(48):
+            
+            if self.learning_mechanism == 'Stateful_QLearning':
+            
+                state_proxy = self.demandTranche(period)
+            
+            else:
+            
+                state_proxy = period
+            
+            chosen_volume = np.argmin(np.abs(np.subtract(self.px_volume_offer_set, (self.constrained_volume_offer[period] /(self.capacity/2)))))
+
+            chosen_intercept = self.bm_intercept_set.index(self.bm_intercept_choices[period])
+            chosen_gradient = self.bm_gradient_set.index(self.bm_gradient_choices[period])
+            
+            self.px_volume_propensities[state_proxy] = self.px_volume_RL.update(props = self.px_volume_propensities[state_proxy],
+                                                                                reward = self.bm_reward[period],
+                                                                                chosen_action = chosen_volume)
+            
+            if (self.single_bm_ladder == True) and (period == 0):
+                
+                self.bm_intercept_propensities = self.bm_intercept_RL.update(props = self.bm_intercept_propensities,
+                                                                                     reward = self.bm_day_reward,
+                                                                                     chosen_action = chosen_intercept)
+                
+                self.bm_gradient_propensities = self.bm_gradient_RL.update(props = self.bm_gradient_propensities,
+                                                                                   reward = self.bm_day_reward,
+                                                                                   chosen_action = chosen_gradient)
+                
+            elif self.single_bm_ladder == False:
+                
+                self.bm_intercept_propensities[state_proxy] = self.bm_intercept_RL.update(props = self.bm_intercept_propensities[state_proxy],
+                                                                                          reward = self.bm_reward[period],
+                                                                                          chosen_action = chosen_intercept)
+                
+                self.bm_gradient_propensities[state_proxy] = self.bm_gradient_RL.update(props = self.bm_intercept_propensities[state_proxy],
+                                                                                        reward = self.bm_reward[period],
+                                                                                        chosen_action = chosen_gradient)
+    
         self.day += 1
         
     
@@ -813,21 +1015,3 @@ class Supplier():
             bid = 30 * (1 + demand[period]/max(demand))
             
         return (demand_forecast, bid)
-    
-    
-    
-    
-    
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-    
-    
-    
