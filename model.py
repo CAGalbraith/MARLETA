@@ -71,7 +71,7 @@ class MarketModel(mesa.Model):
         # TODO: standardise whether we're dealing in MW or MWh, these 2s 
         # everywhere are getting confusing
         
-        if params['synthetic_demand'] == 0:
+        if len(params['synthetic_demand']) == 0:
         
             self.demand = self.system_params['Demand']['Transmission Demand'] * 2  
             self.demand *= self.max_capacity / (params['peak_margin'] * max(self.demand))
@@ -414,11 +414,16 @@ class MarketModel(mesa.Model):
                 
                 # covers the somewhat common case where all generators are 
                 # dispatched, but the cumulative volume is lower than forecast
-                # demand, meaning that the only option is to turn some up
+                # demand, meaning that the only option is to turn some up.
+                # EXPERIMENTAL: if this happens, distributes the VoLL penalty
+                # to all agent proportional to their witheld capacity, to
+                # encourage them to submit more reasonable volumes first time
                 
                 self.px_marginal_price.append(list(offers.items())[-1][1][1])
                 
                 marginal_volume = demand_forecast - cumulative_offers[-1]
+                
+                self.voll_flags[period] = 1
                                     
                 for i, offer in enumerate(list(offers.items())[1:]):
                     
@@ -585,6 +590,8 @@ class MarketModel(mesa.Model):
         
         self.constrained_schedule = OrderedDict()
         
+        self.voll_flags = np.zeros(48)
+        
         for period in range(48):
         
             self.px_period_offers[period] = OrderedDict() 
@@ -676,8 +683,8 @@ class MarketModel(mesa.Model):
         # update generator propensities by passing it back its dispatch
         
         self.schedule.step(self.params['stage_list'][1], 
-                           self.generation,
-                           self.px_marginal_price)
+                           generation = self.generation,
+                           px_marginal_price = self.px_marginal_price)
         
         
         ### BALANCING MECHANISM CLEARING ###
@@ -775,7 +782,8 @@ class MarketModel(mesa.Model):
             # update generator bm_mechanism propensities        
             
             self.schedule.step(self.params['stage_list'][2],
-                               self.generation)
+                               generation = self.generation,
+                               voll_flags = self.voll_flags)
         
         self.datacollector.collect(self)
     
@@ -798,7 +806,7 @@ def runSimulation(model_class, params, days, name = None, verbose = False):
     
     params['days'] = days
     params['verbose'] = verbose
-
+    
     model = model_class(params)
     
     for i in tqdm(range(days), desc = 'Running Model: "{0}"'.format(name)):

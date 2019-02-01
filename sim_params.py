@@ -38,7 +38,7 @@ learning_params['bm_gradient_hold'] = 0
 
 # forces agents to learn only a single bid/offer ladder for the entire day, 
 # resulting in a dramatically simpler but under-optimised BM
-learning_params['single_bm_ladder'] = True
+learning_params['single_bm_ladder'] = False
 
 # the hotter it gets, the more likely the agents will explore new strategies.
 # for constant T, set both _start and _inf as equal
@@ -81,7 +81,7 @@ learning_params['bm_epsilon_decay'] = 1.2 * (m.log(
 
 # switches between using the per-period profit or the day-total profit as 
 # reward, either 'day_profit', 'period_profit', 'kernel_profit', or 'expected_profit'
-learning_params['px_reward_method'] = 'kernel_profit'
+learning_params['px_reward_method'] = 'period_profit'
 learning_params['bm_reward_method'] = 'period_profit'
 
 learning_params['discount'] = 0.4
@@ -89,7 +89,7 @@ learning_params['kernel_radius'] = 1
 
 # controls the magnitude of the rewards that the agents receive for a given 
 # action, with the dampener used to divide the reward
-learning_params['dampening_factor'] = 0.4
+learning_params['dampening_factor'] = 0.5
 
 
 ### physical parameters: MW, £marginal/MWh, £/startup, cycles, minimum up-time, 
@@ -128,9 +128,9 @@ sim_params['wind_sd'] = 0.01
 
 sim_params['synthetic_imbalance'] = []
 
-# specifies whether a synthetic demand profile is being used. If not, choose 0,
+# specifies whether a synthetic demand profile is being used. If not, leave [],
 # otherwise specifiy in MW
-sim_params['synthetic_demand'] = 0
+sim_params['synthetic_demand'] = []
 
 # specifies whether run-time constraints are in effect; 'none', 'soft' for cycling
 # penalties only, or 'all' to include boundedly-rational heuristics
@@ -194,7 +194,7 @@ params = {**learning_params, **phys_params, **sim_params}
 
 results = model.runSimulation(model.MarketModel, 
                               params, 
-                              days = 250, 
+                              days = 500, 
                               name = 'State Test',
                               verbose = False)
 
@@ -222,7 +222,7 @@ vis.individualOffers(results,
                      agent_ids = [2, 3], 
                      periods = [24], 
                      one_gen_per_graph = True, 
-                     ma = 1,
+                     ma = 10,
                      save_graphs = False)
 
 vis.pxStrategyEvolution(results, 
@@ -242,7 +242,7 @@ vis.systemPrices(results,
                  save_graphs = False)
 
 vis.rawDispatch(results, 
-                days = 5, 
+                days = 1, 
                 save_graphs = False)
 
 vis.emissions(results,
